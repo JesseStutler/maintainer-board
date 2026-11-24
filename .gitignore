@@ -1,0 +1,6 @@
+/maintainer-board
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.log

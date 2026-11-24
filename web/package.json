@@ -1,0 +1,6 @@
+{
+  "name": "maintainer-board-web",
+  "private": true,
+  "type": "module",
+  "description": "Marks the embedded front-end as ES modules so the optional Node tests can import it. There is no build step."
+}

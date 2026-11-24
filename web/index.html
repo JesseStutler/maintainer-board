@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Maintainer Board</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme-init.js"></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand-mark" aria-hidden="true"><span class="icon" data-icon="kanban" data-size="16"></span></span>
+        <h1 class="brand">Maintainer Board</h1>
+        <span class="topbar-sep" aria-hidden="true"></span>
+        <span id="repo-context" class="repo-context mono" title="Default repository for bare #123 references"></span>
+        <span id="ao-status" class="pill pill-muted" title="AO daemon status">
+          <span class="dot"></span><span class="pill-label">AO Connecting</span>
+        </span>
+        <button id="updates-pill" class="pill pill-warning pill-button" type="button" hidden
+          title="Cards with unread GitHub updates. Click to show only those cards.">
+          <span class="dot"></span><span class="pill-label">0 updates</span>
+        </button>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-new" class="btn btn-primary" type="button" title="Create a task or start an agent session (N)">
+          <span class="icon" data-icon="plus"></span><span>New Task / Session</span>
+        </button>
+        <button id="btn-import" class="btn" type="button" title="Import historical Copilot and Codex sessions through AO">
+          <span class="icon" data-icon="history"></span><span>Import History</span>
+        </button>
+        <button id="btn-sync" class="btn" type="button" title="Sync every linked pull request and issue now">
+          <span class="icon" data-icon="refresh"></span><span>Sync GitHub</span>
+        </button>
+        <button id="btn-columns" class="btn" type="button" title="Add, rename, recolor, reorder and delete columns">
+          <span class="icon" data-icon="columns"></span><span>Columns</span>
+        </button>
+        <span class="topbar-sep" aria-hidden="true"></span>
+        <button id="btn-notify" class="btn btn-icon" type="button" aria-pressed="false"
+          title="Browser notifications for new updates are off. Click to enable.">
+          <span class="icon" data-icon="bell-off"></span>
+        </button>
+        <button id="btn-theme" class="btn" type="button" title="Switch between dark and light theme">
+          <span class="icon" data-icon="moon"></span><span id="theme-label">Dark</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="filterbar" role="search">
+      <label class="search">
+        <span class="icon" data-icon="search"></span>
+        <input id="search" type="search" autocomplete="off" spellcheck="false"
+          placeholder="Search title, summary, #number, tag, session" aria-label="Search cards">
+        <kbd>/</kbd>
+      </label>
+      <div id="filter-category" class="segmented" role="group" aria-label="Category filter">
+        <button type="button" data-value="" class="active">All</button>
+        <button type="button" data-value="PR_REVIEW">PR Review</button>
+        <button type="button" data-value="ISSUE">Issue</button>
+        <button type="button" data-value="DEV">Dev</button>
+        <button type="button" data-value="DESIGN">Design</button>
+        <button type="button" data-value="TRIAGE">Triage</button>
+      </div>
+      <div id="filter-agent" class="segmented" role="group" aria-label="Agent filter">
+        <button type="button" data-value="" class="active">All Agents</button>
+        <button type="button" data-value="copilot">Copilot</button>
+        <button type="button" data-value="codex">Codex</button>
+      </div>
+      <div class="toggles">
+        <button id="toggle-updates" class="toggle" type="button" aria-pressed="false">Updates Only</button>
+        <button id="toggle-done" class="toggle" type="button" aria-pressed="true">Show Done</button>
+        <button id="toggle-orchestrator" class="toggle" type="button" aria-pressed="false"
+          title="Create and show cards for AO orchestrator sessions">Show Orchestrator</button>
+      </div>
+      <span id="card-count" class="card-count mono"></span>
+    </div>
+
+    <main id="board" class="board" aria-label="Kanban board">
+      <div class="board-loading">Loading board</div>
+    </main>
+  </div>
+
+  <div id="drawer-root"></div>
+  <div id="modal-root"></div>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+  <noscript><p class="noscript">Maintainer Board needs JavaScript.</p></noscript>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
