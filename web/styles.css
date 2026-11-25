@@ -378,27 +378,6 @@ a:hover {
   height: 13px;
 }
 
-/* Without motion the indicators stay visible as still marks. */
-@media (prefers-reduced-motion: reduce) {
-  .spinner {
-    border-color: color-mix(in srgb, currentColor 45%, transparent);
-    border-top-color: currentColor;
-  }
-
-  .thinking-dots i {
-    opacity: 0.7;
-  }
-
-  .progress-strip::after {
-    width: 100%;
-    opacity: 0.45;
-  }
-
-  .status-strip {
-    background-size: 100% 100%;
-  }
-}
-
 .noscript {
   padding: 24px;
 }
@@ -3654,5 +3633,40 @@ button.id-chip:hover {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* Keep explicit busy/loading indicators animating even when OS window
+     animations are disabled (common on Windows/RDP), so slow AI and AO
+     actions never look frozen. */
+  .spinner {
+    animation: spin 0.7s linear infinite !important;
+  }
+
+  .spin svg {
+    animation: spin 0.9s linear infinite !important;
+  }
+
+  .thinking-dots i {
+    animation: dot-wave 1.2s ease-in-out infinite !important;
+  }
+
+  .thinking-dots i:nth-child(2) {
+    animation-delay: 0.16s !important;
+  }
+
+  .thinking-dots i:nth-child(3) {
+    animation-delay: 0.32s !important;
+  }
+
+  .progress-strip::after {
+    animation: strip-slide 1.3s ease-in-out infinite !important;
+  }
+
+  .status-strip {
+    animation: shimmer 1.8s ease-in-out infinite !important;
+  }
+
+  .msg-streaming .msg-body > :last-child::after {
+    animation: blink 1s steps(2, start) infinite !important;
   }
 }
