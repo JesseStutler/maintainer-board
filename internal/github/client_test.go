@@ -405,3 +405,19 @@ func TestDescription(t *testing.T) {
 		t.Fatalf("gh calls = %v", f.calls)
 	}
 }
+
+func TestParseReviewComments(t *testing.T) {
+	single := `[{"user":{"login":"alice"},"created_at":"2026-11-25T08:00:00Z"}]`
+	if got := parseReviewComments([]byte(single)); len(got) != 1 || got[0].User.Login != "alice" {
+		t.Fatalf("single page = %+v", got)
+	}
+	// `gh api --paginate` writes one JSON array per page back-to-back.
+	paginated := `[{"user":{"login":"alice"},"created_at":"2026-11-25T08:00:00Z"}][{"user":{"login":"bob"},"created_at":"2026-11-25T09:00:00Z"}]`
+	if got := parseReviewComments([]byte(paginated)); len(got) != 2 || got[0].User.Login != "alice" || got[1].User.Login != "bob" {
+		t.Fatalf("concatenated pages = %+v", got)
+	}
+	slurped := `[[{"user":{"login":"alice"},"created_at":"2026-11-25T08:00:00Z"}],[{"user":{"login":"bob"},"created_at":"2026-11-25T09:00:00Z"}]]`
+	if got := parseReviewComments([]byte(slurped)); len(got) != 2 || got[1].User.Login != "bob" {
+		t.Fatalf("slurped pages = %+v", got)
+	}
+}

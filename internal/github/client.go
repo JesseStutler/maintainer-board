@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -269,7 +270,7 @@ func (c *Client) Fetch(ctx context.Context, repo string, number int, knownKind s
 	}
 	_ = json.Unmarshal(rest, &rCheck)
 	if rCheck.ReviewComments > 0 && c.User() != "" {
-		if rcOut, err := c.run(ctx, "api", "--paginate", "--slurp", fmt.Sprintf("repos/%s/pulls/%d/comments?per_page=100", repo, number)); err == nil {
+		if rcOut, err := c.run(ctx, "api", "--paginate", fmt.Sprintf("repos/%s/pulls/%d/comments?per_page=100", repo, number)); err == nil {
 			inlineComments = parseReviewComments(rcOut)
 		}
 	}
@@ -348,8 +349,9 @@ func hasLabel(labels []string, name string) bool {
 	return false
 }
 
-// parseReviewComments decodes either a single JSON array or the nested array
-// returned by `gh api --paginate --slurp`.
+// parseReviewComments decodes inline review comments from `gh api --paginate`,
+// which emits one JSON array per page back-to-back, or a nested array when
+// slurped.
 func parseReviewComments(data []byte) []ghReviewComment {
 	var pages [][]ghReviewComment
 	if err := json.Unmarshal(data, &pages); err == nil {
@@ -359,11 +361,18 @@ func parseReviewComments(data []byte) []ghReviewComment {
 		}
 		return out
 	}
-	var flat []ghReviewComment
-	if err := json.Unmarshal(data, &flat); err == nil {
-		return flat
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var out []ghReviewComment
+	for {
+		var page []ghReviewComment
+		if err := dec.Decode(&page); err != nil {
+			if errors.Is(err, io.EOF) {
+				return out
+			}
+			return nil
+		}
+		out = append(out, page...)
 	}
-	return nil
 }
 
 // parsePR combines `gh pr view --json` output with the REST pulls payload,

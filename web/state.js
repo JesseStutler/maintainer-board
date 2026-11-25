@@ -242,6 +242,18 @@ export function myReviewInfo(card) {
   return null;
 }
 
+/**
+ * Whether the PR-wide review decision chip adds information beyond the
+ * maintainer's personal review badge on the card face.
+ */
+export function showCardReviewDecision(card, mine) {
+  if (!card.ghReviewDecision) return false;
+  if (!mine) return true;
+  if (card.ghReviewDecision === 'REVIEW_REQUIRED') return false;
+  if (mine.kind === 'current' && card.ghReviewDecision === card.ghMyReviewState) return false;
+  return true;
+}
+
 /** Distinct authors of the linked items on the board, sorted by name. */
 export function cardAuthors() {
   const seen = new Map();

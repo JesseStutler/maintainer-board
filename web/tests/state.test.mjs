@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { state, matchesFilters, searchMatches, myReviewInfo, cardAuthors, isMine, activityInfo, ciInfo, reviewInfo, AUTHOR_MINE } from '../state.js';
+import { state, matchesFilters, searchMatches, myReviewInfo, showCardReviewDecision, cardAuthors, isMine, activityInfo, ciInfo, reviewInfo, AUTHOR_MINE } from '../state.js';
 
 function card(overrides = {}) {
   return {
@@ -158,4 +158,19 @@ test('labels shown on cards', () => {
   assert.equal(activityInfo(session({ needsResume: true })).label, 'Resume needed');
   assert.deepEqual(['SUCCESS', 'FAILURE', 'PENDING', 'UNKNOWN'].map((s) => (ciInfo(s) || {}).label), ['CI Passing', 'CI Failing', 'CI Pending', undefined]);
   assert.deepEqual(['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED', ''].map((s) => (reviewInfo(s) || {}).short), ['Approved', 'Changes Req', 'Review Required', undefined]);
+
+  setBoard([]);
+  // Someone else's PR: hide redundant Review Required when personal badge is shown.
+  const commented = pr({ ghReviewDecision: 'REVIEW_REQUIRED', ghMyReviewState: 'COMMENTED' });
+  assert.equal(showCardReviewDecision(commented, myReviewInfo(commented)), false);
+  const stale = pr({ ghReviewDecision: 'REVIEW_REQUIRED', ghMyReviewState: 'COMMENTED', ghIsStaleReview: true });
+  assert.equal(showCardReviewDecision(stale, myReviewInfo(stale)), false);
+  const unreviewed = pr({ ghReviewDecision: 'REVIEW_REQUIRED' });
+  assert.equal(showCardReviewDecision(unreviewed, myReviewInfo(unreviewed)), false);
+  // Distinct PR-wide decision (e.g. another maintainer approved) still shows.
+  const otherApproved = pr({ ghReviewDecision: 'APPROVED', ghMyReviewState: 'COMMENTED' });
+  assert.equal(showCardReviewDecision(otherApproved, myReviewInfo(otherApproved)), true);
+  // Own PR keeps Review Required because personal badge is absent.
+  const mine = pr({ ghAuthor: 'JesseStutler', ghReviewDecision: 'REVIEW_REQUIRED' });
+  assert.equal(showCardReviewDecision(mine, myReviewInfo(mine)), true);
 });

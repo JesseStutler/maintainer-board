@@ -20,6 +20,7 @@ import {
   ciInfo,
   reviewInfo,
   myReviewInfo,
+  showCardReviewDecision,
   isMine,
   searchMatches,
   aiSearchActive,
@@ -110,11 +111,11 @@ function cardStatus(card) {
   }
   const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
   const isPR = card.ghKind === 'pr';
-  if (isPR && open) {
+  const mine = myReviewInfo(card);
+  if (isPR && open && showCardReviewDecision(card, mine)) {
     const review = reviewInfo(card.ghReviewDecision);
     if (review) strip.appendChild(chip(CHIP_TONES[review.tone], review.short, review.icon, review.title));
   }
-  const mine = myReviewInfo(card);
   if (mine) {
     const node = chip(CHIP_TONES[mine.tone], mine.label, mine.icon, mine.title);
     node.classList.add('chip-mine');
