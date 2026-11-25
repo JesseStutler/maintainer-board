@@ -220,14 +220,12 @@ func TestEvaluateReview(t *testing.T) {
 			ReviewInput{StoredState: MyReviewReviewed, StoredAt: marked, Live: Snapshot{State: StateOpen}, LastOtherActivityAt: latest},
 			ReviewStatus{MyReviewReviewed, marked, true}},
 
-		// Reviewed on GitHub, new push, then marked caught up on the board:
-		// the mark is the newer reference and the state stays GitHub's.
-		{"caught up on the board after a push",
+		// Local stored timestamps never override a real GitHub review: if a
+		// new commit landed after the GitHub review, it stays stale until a
+		// new review is submitted on GitHub.
+		{"local timestamp does not mask stale github review",
 			ReviewInput{GitHub: onHead, StoredState: MyReviewApproved, StoredAt: marked, AckHeadSHA: "bbb", Live: Snapshot{State: StateOpen, HeadSHA: "bbb"}, LastCommitAt: later, LastOtherActivityAt: later},
-			ReviewStatus{MyReviewApproved, marked, false}},
-		{"another push after catching up",
-			ReviewInput{GitHub: onHead, StoredState: MyReviewApproved, StoredAt: marked, AckHeadSHA: "bbb", Live: Snapshot{State: StateOpen, HeadSHA: "ccc"}, LastCommitAt: latest},
-			ReviewStatus{MyReviewApproved, marked, true}},
+			ReviewStatus{MyReviewApproved, reviewed, true}},
 		// A formal review after a manual mark replaces the mark.
 		{"github review after a manual mark",
 			ReviewInput{GitHub: MyReview{State: MyReviewCommented, At: latest, CommitSHA: "aaa"}, StoredState: MyReviewReviewed, StoredAt: marked, AckHeadSHA: "old", Live: open},

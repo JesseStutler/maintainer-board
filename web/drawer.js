@@ -997,38 +997,24 @@ function renderGitHub(card) {
   const stack = h('div', { class: 'stack' });
 
   if (card.hasUnreadUpdates) {
-    const waiting = columnByRole('waiting');
-    const actions = h(
-      'div',
-      { class: 'alert-actions' },
-      h(
-        'button',
-        {
-          class: 'btn btn-sm btn-warning',
-          type: 'button',
-          title: 'Record the current state as reviewed and clear the update markers',
-          onClick: (e) => withBusy(e.currentTarget, () => acknowledge('')),
-        },
-        icon('check', 13),
-        h('span', null, 'Mark Caught Up'),
-      ),
-    );
-    if (waiting) {
-      actions.appendChild(
-        h(
-          'button',
-          {
-            class: 'btn btn-sm btn-warning',
-            type: 'button',
-            title: `Mark caught up and move the card to ${waiting.title}`,
-            onClick: (e) => withBusy(e.currentTarget, () => acknowledge(waiting.id)),
-          },
-          h('span', null, 'Reviewed'),
-          icon('arrow-right', 13),
-          h('span', null, waiting.title),
-        ),
-      );
-    }
+    const isPR = card.ghKind === 'pr';
+    const actions = !isPR
+      ? h(
+          'div',
+          { class: 'alert-actions' },
+          h(
+            'button',
+            {
+              class: 'btn btn-sm btn-warning',
+              type: 'button',
+              title: 'Clear the update banner for this issue',
+              onClick: (e) => withBusy(e.currentTarget, () => acknowledge('')),
+            },
+            icon('check', 13),
+            h('span', null, 'Mark Caught Up'),
+          ),
+        )
+      : null;
     stack.appendChild(
       h(
         'div',
@@ -1152,16 +1138,16 @@ function reviewRow(card, mine) {
       ),
     );
   }
-  // With unread updates the banner above offers Mark Caught Up, which
-  // records the review as well.
-  if (open && !card.hasUnreadUpdates && (!mine || mine.kind !== 'current')) {
+  // Issues have no GitHub review API, so allow marking them reviewed locally.
+  // Pull requests reflect actual GitHub reviews only (display-only here).
+  if (card.ghKind !== 'pr' && open && !card.hasUnreadUpdates && (!mine || mine.kind !== 'current')) {
     row.appendChild(
       h(
         'button',
         {
           class: 'btn btn-sm',
           type: 'button',
-          title: `Record that you reviewed the current state of this ${kind}, for example after reading it locally`,
+          title: `Record that you reviewed the current state of this ${kind}`,
           onClick: (e) => withBusy(e.currentTarget, () => acknowledge('')),
         },
         icon('check', 14),

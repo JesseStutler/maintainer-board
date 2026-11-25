@@ -339,13 +339,11 @@ type ReviewStatus struct {
 	Stale bool
 }
 
-// EvaluateReview merges the review GitHub reports with the mark the
-// maintainer set by hand, and decides whether that review is out of date.
+// EvaluateReview derives the maintainer's review status and staleness.
 //
-// A review on GitHub always names the state. Marking the card reviewed on
-// the board afterwards only moves the reference point forward: it means
-// "I have seen everything up to now". Without a review on GitHub a manual
-// mark is kept as REVIEWED.
+// A review on GitHub is always authoritative for both state and staleness, so
+// local board actions never mask an out-of-date GitHub review. Without a
+// GitHub review (for example on an issue), a manual REVIEWED mark is kept.
 //
 // The review is stale when the head commit moved past the reviewed one or
 // when someone other than the user (bots excluded) commented or reviewed
@@ -360,9 +358,6 @@ func EvaluateReview(in ReviewInput) ReviewStatus {
 		state, at, head = MyReviewReviewed, in.StoredAt, in.AckHeadSHA
 	case state == "":
 		return ReviewStatus{}
-	case After(in.StoredAt, at):
-		// Marked caught up on the board after the review on GitHub.
-		at, head = in.StoredAt, in.AckHeadSHA
 	}
 	out := ReviewStatus{State: state, At: at}
 	if IsTerminal(in.Live.State) {

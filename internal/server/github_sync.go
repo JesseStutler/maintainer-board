@@ -574,9 +574,10 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 		setTracking(c, github.Ack(liveSnapshot(c)))
 		c.AckAt = now
 		c.AckOtherActivityAt = github.LatestTime(c.PrevOtherActivityAt, c.GHUpdatedAt)
-		if !isOwn(c.GHAuthor, me) {
-			// Acknowledging is a review of the current state. A review
-			// state read from GitHub is kept; only the reference time moves.
+		if !isOwn(c.GHAuthor, me) && c.GHKind != github.KindPR {
+			// Issues have no GitHub review API, so acknowledging records a
+			// local REVIEWED mark. Pull request review state is driven
+			// strictly by actual GitHub reviews.
 			if c.GHMyReviewState == "" {
 				c.GHMyReviewState = github.MyReviewReviewed
 			}

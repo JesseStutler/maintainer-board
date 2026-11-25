@@ -1147,18 +1147,17 @@ func TestPersonalReviewFromGitHub(t *testing.T) {
 		t.Fatalf("after a push = %q at %q stale %v unread %v", c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview, c.HasUnreadUpdates)
 	}
 
-	// Looking at the push and marking the card caught up settles it; the
-	// state stays the one from GitHub and the reference time moves.
+	// Local ack on a PR does not fake a GitHub review or hide staleness; the
+	// review stays stale until a new review is actually submitted on GitHub.
 	acked := hn.must(200, "POST", "/api/cards/"+id+"/ack", nil)
-	if acked["ghIsStaleReview"] != false || acked["ghMyReviewState"] != "COMMENTED" || acked["ghMyReviewedAt"] == reviewAt {
-		t.Fatalf("acked card = %v", acked)
+	if acked["ghIsStaleReview"] != true || acked["ghMyReviewState"] != "COMMENTED" || acked["ghMyReviewedAt"] != reviewAt {
+		t.Fatalf("acked PR card should keep stale GitHub review = %v", acked)
 	}
-	markedAt := acked["ghMyReviewedAt"].(string)
-	if c = sync(); c.GHIsStaleReview || c.GHMyReviewedAt != markedAt {
-		t.Fatalf("sync after the ack = stale %v at %q, want %q", c.GHIsStaleReview, c.GHMyReviewedAt, markedAt)
+	if c = sync(); !c.GHIsStaleReview || c.GHMyReviewedAt != reviewAt {
+		t.Fatalf("sync after ack = stale %v at %q, want stale at %q", c.GHIsStaleReview, c.GHMyReviewedAt, reviewAt)
 	}
 
-	// The author answers in a comment: out of date again.
+	// The author answers in a comment: still stale.
 	hn.gh.updateItem(key, func(it *github.Item) {
 		it.Snapshot.Comments, it.LastOtherActivityAt = 8, farFuture
 	})
@@ -1295,13 +1294,10 @@ func TestMarkReviewedByHand(t *testing.T) {
 		t.Fatalf("a cleared mark came back: %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
 	}
 
-	// A new head after a manual mark on a pull request is stale too.
+	// Pull requests never record a synthetic local REVIEWED mark on /ack.
 	pr := hn.newLinkedCard("waiting")
-	hn.must(200, "POST", "/api/cards/"+pr+"/ack", nil)
-	hn.gh.update("volcano-sh/volcano#6247", func(s *github.Snapshot) { s.Commits, s.HeadSHA = 2, "bbb" })
-	hn.must(200, "POST", "/api/cards/"+pr+"/sync-github", nil)
-	if c := hn.card(pr); c.GHMyReviewState != "REVIEWED" || !c.GHIsStaleReview {
-		t.Fatalf("manual mark after a push = %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
+	if out := hn.must(200, "POST", "/api/cards/"+pr+"/ack", nil); out["ghMyReviewState"] != "" || out["ghMyReviewedAt"] != "" {
+		t.Fatalf("PR after ack should not gain a local review mark = %v", out)
 	}
 
 	// Nobody reviews their own pull request: catching up leaves no mark.
@@ -1309,11 +1305,6 @@ func TestMarkReviewedByHand(t *testing.T) {
 	own := hn.newLinkedCard("waiting")
 	if out := hn.must(200, "POST", "/api/cards/"+own+"/ack", nil); out["ghMyReviewState"] != "" || out["ghMyReviewedAt"] != "" {
 		t.Fatalf("own pull request after ack = %v", out)
-	}
-	// A mark made before the author was known is dropped on the next sync.
-	hn.must(200, "POST", "/api/cards/"+pr+"/sync-github", nil)
-	if c := hn.card(pr); c.GHMyReviewState != "" || c.GHIsStaleReview {
-		t.Fatalf("own pull request kept a review mark: %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
 	}
 }
 
