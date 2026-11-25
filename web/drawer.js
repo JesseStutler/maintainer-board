@@ -1023,11 +1023,7 @@ function renderGitHub(card) {
         h(
           'div',
           { class: 'alert-body' },
-          h(
-            'div',
-            { class: 'alert-title' },
-            card.updateCycles > 1 ? `Updated ${card.updateCycles}x since your last review` : 'Updated since your last review',
-          ),
+          h('div', { class: 'alert-title' }, 'Updated since your last review'),
           h('div', { class: 'alert-detail' }, card.updateSummary || 'New activity'),
           actions,
         ),

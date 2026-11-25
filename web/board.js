@@ -174,14 +174,12 @@ function renderCard(card) {
   if (status) el.appendChild(status);
 
   if (card.hasUnreadUpdates) {
-    const times = card.updateCycles > 1 ? `${card.updateCycles} separate times` : 'once';
     el.appendChild(
       h(
         'div',
-        { class: 'card-update', title: `Updated ${times} since you last marked this card caught up` },
+        { class: 'card-update', title: card.updateSummary || 'New activity since your last review' },
         icon('alert', 13),
         h('span', { class: 'text' }, card.updateSummary || 'New activity'),
-        card.updateCycles > 1 ? h('span', { class: 'cycles' }, `(${card.updateCycles}x)`) : null,
       ),
     );
   }
