@@ -289,6 +289,31 @@ func TestCleanOutputCapsLongAnswers(t *testing.T) {
 	}
 }
 
+func TestBuildTitlePromptAndCleanTitle(t *testing.T) {
+	prompt := BuildTitlePrompt(Input{
+		Title:       "please review this PR for me",
+		GitHub:      "pull request volcano-sh/volcano#6367: scheduler: expose task state counts in PodGroup status",
+		Description: "Adds task state counts to PodGroup status for observability.",
+	})
+	if !strings.HasPrefix(prompt, PromptMarker) {
+		t.Fatalf("title prompt must start with PromptMarker so history filters it: %q", prompt)
+	}
+	if !strings.Contains(prompt, "volcano-sh/volcano#6367") {
+		t.Fatalf("title prompt missing GitHub context: %q", prompt)
+	}
+
+	cases := map[string]string{
+		"Title: \"\u66b4\u9732 PodGroup \u4efb\u52a1\u72b6\u6001\u8ba1\u6570\u3002\"": "\u66b4\u9732 PodGroup \u4efb\u52a1\u72b6\u6001\u8ba1\u6570",
+		"**\u6e05\u7406 CSI NodeVolumeLimits \u5b58\u91cf\u4ee3\u7801**":             "\u6e05\u7406 CSI NodeVolumeLimits \u5b58\u91cf\u4ee3\u7801",
+		"Here is the title:\n\u4fee\u590d Preempt \u540e Pod \u5361\u6b7b.":          "\u4fee\u590d Preempt \u540e Pod \u5361\u6b7b",
+	}
+	for raw, want := range cases {
+		if got := CleanTitle(raw); got != want {
+			t.Errorf("CleanTitle(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 func TestSummarizeModelFallbackChain(t *testing.T) {
 	const good = "\u8bc4\u5ba1 PR #6247 \u4e2d\u79fb\u9664 CSI scalar \u8ba1\u6570\u7684\u6539\u52a8\u3002"
 	const (

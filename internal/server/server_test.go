@@ -304,6 +304,11 @@ type fakeAI struct {
 	input summary.Input
 	calls int
 
+	title      string
+	titleErr   error
+	titleInput summary.Input
+	titleCalls int
+
 	// AI search: the answer to give, and what was asked.
 	searchMatches []summary.SearchMatch
 	searchErr     error
@@ -348,6 +353,12 @@ func (f *fakeAI) Summarize(_ context.Context, in summary.Input) (string, string,
 	f.calls++
 	f.input = in
 	return f.text, "copilot", f.err
+}
+
+func (f *fakeAI) OptimizeTitle(_ context.Context, in summary.Input) (string, string, error) {
+	f.titleCalls++
+	f.titleInput = in
+	return f.title, "gemini-3.8-flash", f.titleErr
 }
 
 type harness struct {
@@ -2137,6 +2148,37 @@ func TestSummarize(t *testing.T) {
 	}
 	if hn.ai.calls != calls {
 		t.Error("the summarizer ran for a card with nothing to summarize")
+	}
+}
+
+func TestOptimizeTitle(t *testing.T) {
+	hn := newHarness(t)
+	hn.ai.title = "Clean up CSI NodeVolumeLimits legacy code"
+	hn.ao.sessions = []ao.Session{worker("standalone-1", "codex", "help me check PR #6247")}
+	hn.ao.conversations["standalone-1"] = &ao.Conversation{Messages: []ao.Message{{Role: "user", Text: "review #6247"}}}
+	hn.syncAO()
+	id := hn.cardBySession("standalone-1").ID
+
+	out := hn.must(200, "POST", "/api/cards/"+id+"/optimize-title", nil)
+	if out["title"] != hn.ai.title || out["engine"] != "gemini-3.8-flash" {
+		t.Fatalf("optimize-title = %v", out)
+	}
+	if c := hn.card(id); c.Title != hn.ai.title {
+		t.Fatalf("card title = %q, want %q", c.Title, hn.ai.title)
+	}
+	if got := hn.eventMessages(id); got[len(got)-1] != "AI title optimized with gemini-3.8-flash (Copilot CLI)" {
+		t.Fatalf("timeline = %q", got)
+	}
+
+	hn.ai.titleErr = errors.New("AI title optimization failed: timeout")
+	if code := hn.errorCode(502, "POST", "/api/cards/"+id+"/optimize-title", nil); code != "TITLE_OPTIMIZE_FAILED" {
+		t.Fatalf("failed optimize-title: code = %s", code)
+	}
+
+	hn.ai.titleErr = nil
+	empty := hn.must(201, "POST", "/api/cards", map[string]any{"title": "Bare"})["card"].(map[string]any)["id"].(string)
+	if code := hn.errorCode(409, "POST", "/api/cards/"+empty+"/optimize-title", nil); code != "NOTHING_TO_OPTIMIZE" {
+		t.Fatalf("bare card optimize-title: code = %s", code)
 	}
 }
 

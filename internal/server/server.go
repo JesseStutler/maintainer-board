@@ -61,6 +61,7 @@ type userResolver interface {
 // semantic searches, and names the engine that produced the result.
 type Summarizer interface {
 	Summarize(ctx context.Context, in summary.Input) (text, engine string, err error)
+	OptimizeTitle(ctx context.Context, in summary.Input) (title, engine string, err error)
 	Search(ctx context.Context, in summary.SearchInput) (matches []summary.SearchMatch, engine string, err error)
 	SearchHistory(ctx context.Context, in summary.HistoryInput) (matches []summary.HistoryMatch, engine string, err error)
 }
@@ -243,6 +244,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/cards/{id}/ack", s.handleAck)
 	mux.HandleFunc("POST /api/cards/{id}/unreview", s.handleUnreview)
 	mux.HandleFunc("POST /api/cards/{id}/summarize", s.handleSummarize)
+	mux.HandleFunc("POST /api/cards/{id}/optimize-title", s.handleOptimizeTitle)
 	mux.HandleFunc("POST /api/cards/{id}/session", s.handleStartSession)
 	mux.HandleFunc("DELETE /api/cards/{id}/session", s.handleDeleteCardSession)
 	mux.HandleFunc("POST /api/cards/{id}/unlink", s.handleUnlinkSession)

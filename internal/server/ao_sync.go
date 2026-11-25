@@ -856,3 +856,38 @@ func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request) {
 	s.hub.Publish()
 	writeJSON(w, http.StatusOK, map[string]any{"card": s.view(updated), "summary": text, "engine": engine})
 }
+
+func (s *Server) handleOptimizeTitle(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	card, err := s.store.GetCard(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	in := s.summaryInput(ctx, card)
+	if len(in.Turns) == 0 && len(in.Recent) == 0 && in.GitHub == "" && strings.TrimSpace(in.Notes) == "" {
+		writeError(w, http.StatusConflict, "NOTHING_TO_OPTIMIZE", "There is not enough context to optimize this title yet. Link a pull request, issue, or session, or add notes first.")
+		return
+	}
+	title, engine, err := s.ai.OptimizeTitle(ctx, in)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		s.log.Warn("ai title optimization failed", "card", id, "err", err)
+		writeError(w, http.StatusBadGateway, "TITLE_OPTIMIZE_FAILED", capitalize(err.Error())+".")
+		return
+	}
+	updated, err := s.store.UpdateCard(ctx, id, func(c *db.Card, m *db.Mutation) error {
+		c.Title = title
+		m.Event(db.EventSummary, "AI title optimized with "+engineLabel(engine))
+		return nil
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.hub.Publish()
+	writeJSON(w, http.StatusOK, map[string]any{"card": s.view(updated), "title": title, "engine": engine})
+}

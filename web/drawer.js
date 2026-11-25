@@ -273,6 +273,20 @@ function build(card) {
     }
   });
 
+  els.optimizeTitle = h(
+    'button',
+    {
+      class: 'btn btn-ghost btn-sm title-ai-btn',
+      type: 'button',
+      title: 'Optimize title with AI from the linked PR/issue and conversation',
+      'aria-label': 'Optimize title with AI',
+      onClick: (e) => withBusy(e.currentTarget, optimizeTitle, null, 'Optimizing...'),
+    },
+    icon('sparkles', 14),
+    h('span', { class: 'btn-label' }, 'AI Title'),
+  );
+  const titleRow = h('div', { class: 'title-row' }, els.title, els.optimizeTitle);
+
   els.tags = h('div', { class: 'tag-row' });
   els.tagInput = h('input', { class: 'tag-input', type: 'text', placeholder: 'Add tag', maxlength: '40', 'aria-label': 'Add tag' });
   els.tagInput.addEventListener('keydown', (e) => {
@@ -301,7 +315,7 @@ function build(card) {
     if (els.timeline.open) loadTimeline(true);
   });
 
-  const details = h('div', { class: 'drawer-details' }, els.title, els.tags, els.summary, els.github, els.notes);
+  const details = h('div', { class: 'drawer-details' }, titleRow, els.tags, els.summary, els.github, els.notes);
   if (!card.aoSessionId) details.appendChild(els.agentStart);
   details.append(els.controlsSection, els.timeline);
 
@@ -839,6 +853,19 @@ async function summarize() {
     active.summarizing = null;
     if (ctx === active) rerender('summary');
   }
+}
+
+async function optimizeTitle() {
+  if (!ctx) return;
+  const cardId = ctx.cardId;
+  const res = await api.post(cardPath(cardId, '/optimize-title'));
+  applyCard(res.card);
+  if (ctx && ctx.cardId === cardId) {
+    ctx.els.title.value = res.card.title;
+    autoGrow(ctx.els.title);
+  }
+  const engine = res.engine === 'copilot' || res.engine === 'codex' ? harnessLabel(res.engine) : `${res.engine} (Copilot CLI)`;
+  toast(`Title optimized with ${engine}.`, 'success');
 }
 
 function renderNotes(card) {
