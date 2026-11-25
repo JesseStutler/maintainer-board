@@ -85,7 +85,7 @@ func clearGitHub(c *db.Card) {
 	c.GHLabels = db.StringList{}
 	c.GHUpdatedAt, c.GHLastSyncedAt, c.GHError = "", "", ""
 	c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = "", "", false
-	c.AckAt = ""
+	c.AckAt, c.AckOtherActivityAt, c.PrevOtherActivityAt = "", "", ""
 	setTracking(c, github.Tracking{})
 }
 
@@ -126,21 +126,50 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 		c.GHCommitCount, c.GHCommentCount, c.GHReviewCommentCount = snap.Commits, snap.Comments, snap.ReviewComments
 		c.GHLastSyncedAt, c.GHError = now, ""
 
+		own := isOwn(item.Author, me)
+		baselineAt := github.LatestTime(c.AckOtherActivityAt, c.AckUpdatedAt)
+		if baselineAt == "" {
+			baselineAt = c.AckAt
+		}
+		if !own && github.After(c.GHMyReviewedAt, baselineAt) {
+			baselineAt = c.GHMyReviewedAt
+		}
+		var authorReplies, otherReplies int
+		var ownReviewOnly bool
+		if item.HasActorData && !first {
+			authorReplies, otherReplies = github.CountNewActivities(item.OtherActivities, item.Author, baselineAt, own)
+			ownReviewOnly = !own && item.MyReview.State != "" && github.After(item.MyReview.At, baselineAt) && authorReplies == 0 && otherReplies == 0
+		}
+
 		result = github.Evaluate(github.Input{
-			Live:              snap,
-			Track:             trackingOf(c),
-			FirstSync:         first,
-			AutoMove:          c.AutoMove,
-			ColumnRole:        cols.byID[c.ColumnID].Role,
-			UnresolvedThreads: item.UnresolvedThreads,
+			Live:                  snap,
+			Track:                 trackingOf(c),
+			FirstSync:             first,
+			AutoMove:              c.AutoMove,
+			ColumnRole:            cols.byID[c.ColumnID].Role,
+			UnresolvedThreads:     item.UnresolvedThreads,
+			Kind:                  item.Kind,
+			Own:                   own,
+			HasActorData:          item.HasActorData,
+			AuthorReplies:         authorReplies,
+			OtherReplies:          otherReplies,
+			OwnReviewOnly:         ownReviewOnly,
+			LatestOtherActivityAt: item.LastOtherActivityAt,
+			PrevOtherActivityAt:   c.PrevOtherActivityAt,
 		})
 		setTracking(c, result.Track)
+		if item.HasActorData {
+			if first {
+				c.AckOtherActivityAt = github.LatestTime(item.LastOtherActivityAt, snap.UpdatedAt)
+			}
+			c.PrevOtherActivityAt = item.LastOtherActivityAt
+		}
 		review := github.EvaluateReview(github.ReviewInput{
 			GitHub:              item.MyReview,
 			StoredState:         c.GHMyReviewState,
 			StoredAt:            c.GHMyReviewedAt,
 			AckHeadSHA:          c.AckHeadSHA,
-			Own:                 isOwn(item.Author, me),
+			Own:                 own,
 			Live:                snap,
 			LastCommitAt:        item.LastCommitAt,
 			LastOtherActivityAt: item.LastOtherActivityAt,
@@ -535,6 +564,7 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC().Format(time.RFC3339)
 		setTracking(c, github.Ack(liveSnapshot(c)))
 		c.AckAt = now
+		c.AckOtherActivityAt = github.LatestTime(c.PrevOtherActivityAt, c.GHUpdatedAt)
 		if !isOwn(c.GHAuthor, me) {
 			// Acknowledging is a review of the current state. A review
 			// state read from GitHub is kept; only the reference time moves.

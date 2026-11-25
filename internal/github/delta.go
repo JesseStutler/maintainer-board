@@ -65,6 +65,27 @@ type Input struct {
 	// UnresolvedThreads counts unresolved review threads; it blocks the move
 	// to the ready column. Zero or negative means none or unknown.
 	UnresolvedThreads int
+
+	// Kind is KindPR or KindIssue.
+	Kind string
+	// Own is true when the board's current user authored this PR or issue.
+	Own bool
+	// HasActorData is true when AuthorReplies, OtherReplies, and
+	// LatestOtherActivityAt reflect non-self, non-bot GitHub activity.
+	HasActorData bool
+	// AuthorReplies counts non-self comments/reviews by the PR or issue author
+	// strictly after the acknowledged baseline (used when !Own).
+	AuthorReplies int
+	// OtherReplies counts non-self, non-bot comments/reviews by other people
+	// strictly after the acknowledged baseline.
+	OtherReplies int
+	// OwnReviewOnly is true when the current user submitted a review on
+	// someone else's PR after the baseline and no other person acted after.
+	OwnReviewOnly bool
+	// LatestOtherActivityAt is the newest non-self, non-bot activity timestamp.
+	LatestOtherActivityAt string
+	// PrevOtherActivityAt is LatestOtherActivityAt from the previous poll.
+	PrevOtherActivityAt string
 }
 
 type Result struct {
@@ -145,18 +166,52 @@ func Evaluate(in Input) Result {
 		return res
 	}
 
-	newCommits := max(0, live.Commits-ack.Commits)
+	newCommits := 0
 	forcePushed := false
-	if newCommits == 0 && live.HeadSHA != "" && ack.HeadSHA != "" && live.HeadSHA != ack.HeadSHA {
-		forcePushed = true
-		newCommits = 1
+	// On your own PR, your own pushes should not raise an unread alert; only
+	// advance the acknowledged commit baseline quietly.
+	if in.HasActorData && in.Own {
+		ack.HeadSHA = live.HeadSHA
+		ack.Commits = live.Commits
+	} else {
+		newCommits = max(0, live.Commits-ack.Commits)
+		if newCommits == 0 && live.HeadSHA != "" && ack.HeadSHA != "" && live.HeadSHA != ack.HeadSHA {
+			forcePushed = true
+			newCommits = 1
+		}
 	}
-	newComments := max(0, (live.Comments+live.ReviewComments)-(ack.Comments+ack.ReviewComments))
+
+	var newAuthorReplies, newOtherReplies, newComments int
+	if in.HasActorData {
+		newAuthorReplies = max(0, in.AuthorReplies)
+		newOtherReplies = max(0, in.OtherReplies)
+		newComments = newAuthorReplies + newOtherReplies
+		if newComments == 0 {
+			// Quietly advance comment counts over the user's own or bot comments.
+			ack.Comments = live.Comments
+			ack.ReviewComments = live.ReviewComments
+		}
+	} else {
+		newComments = max(0, (live.Comments+live.ReviewComments)-(ack.Comments+ack.ReviewComments))
+	}
+
 	ciChanged := settledCI(live.CI) && live.CI != ack.CI
 	reviewChanged := live.ReviewDecision != ack.ReviewDecision
+	ownApprovedReady := false
+	if reviewChanged && in.HasActorData && in.OwnReviewOnly {
+		reviewChanged = false
+		ack.ReviewDecision = live.ReviewDecision
+		if live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0 {
+			ownApprovedReady = true
+		}
+	}
 
 	if newCommits == 0 && newComments == 0 && !stateChanged && !ciChanged && !reviewChanged {
-		return Result{Track: Tracking{Ack: ack, Prev: nextPrev}}
+		res := Result{Track: Tracking{Ack: ack, Prev: nextPrev}}
+		if ownApprovedReady && in.AutoMove && in.ColumnRole != RoleReady && in.ColumnRole != RoleDone {
+			res.MoveToRole = RoleReady
+		}
+		return res
 	}
 
 	var parts []string
@@ -174,13 +229,33 @@ func Evaluate(in Input) Result {
 			parts = append(parts, "State changed to "+strings.ToLower(live.State))
 		}
 	}
+	isPRReview := in.HasActorData && !in.Own && in.Kind != KindIssue
 	switch {
+	case forcePushed && isPRReview:
+		parts = append(parts, "Author force-pushed")
 	case forcePushed:
 		parts = append(parts, "Force-pushed")
+	case newCommits > 0 && isPRReview:
+		parts = append(parts, "Author pushed "+plural(newCommits, "commit"))
 	case newCommits > 0:
 		parts = append(parts, plural(newCommits, "commit"))
 	}
-	if newComments > 0 {
+	if in.HasActorData {
+		if !in.Own {
+			if newAuthorReplies > 0 {
+				parts = append(parts, fmt.Sprintf("Author replied (+%d)", newAuthorReplies))
+			}
+			if newOtherReplies > 0 {
+				parts = append(parts, plural(newOtherReplies, "response"))
+			}
+		} else if newOtherReplies > 0 {
+			if in.Kind == KindIssue {
+				parts = append(parts, plural(newOtherReplies, "comment"))
+			} else {
+				parts = append(parts, fmt.Sprintf("Reviewer commented (+%d)", newOtherReplies))
+			}
+		}
+	} else if newComments > 0 {
 		parts = append(parts, plural(newComments, "comment"))
 	}
 	if reviewChanged {
@@ -208,13 +283,25 @@ func Evaluate(in Input) Result {
 	}
 	summary := strings.Join(parts, ", ")
 
-	material := live.HeadSHA != prev.HeadSHA ||
-		live.Commits != prev.Commits ||
-		live.Comments != prev.Comments ||
-		live.ReviewComments != prev.ReviewComments ||
-		live.State != prev.State ||
-		live.ReviewDecision != prev.ReviewDecision ||
-		(settledCI(live.CI) && live.CI != prev.CI)
+	var material bool
+	if in.HasActorData {
+		commitMaterial := !in.Own && (live.HeadSHA != prev.HeadSHA || live.Commits != prev.Commits)
+		otherActivityMaterial := in.LatestOtherActivityAt != "" && in.LatestOtherActivityAt != in.PrevOtherActivityAt
+		reviewMaterial := !in.OwnReviewOnly && live.ReviewDecision != prev.ReviewDecision
+		material = commitMaterial ||
+			otherActivityMaterial ||
+			live.State != prev.State ||
+			reviewMaterial ||
+			(settledCI(live.CI) && live.CI != prev.CI)
+	} else {
+		material = live.HeadSHA != prev.HeadSHA ||
+			live.Commits != prev.Commits ||
+			live.Comments != prev.Comments ||
+			live.ReviewComments != prev.ReviewComments ||
+			live.State != prev.State ||
+			live.ReviewDecision != prev.ReviewDecision ||
+			(settledCI(live.CI) && live.CI != prev.CI)
+	}
 	newCycle := material || !in.Track.HasUnread
 
 	cycles := in.Track.Cycles

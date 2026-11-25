@@ -355,6 +355,188 @@ func TestOnlyANewCycleMovesTheCard(t *testing.T) {
 	tr.expect(RoleUpdates, true, 2, 2, "+2 commits")
 }
 
+func TestMaintainerReviewIgnoresSelfAndTracksAuthorPushAndReplies(t *testing.T) {
+	base := openPR()
+	track := Ack(base)
+	prevOther := "2026-11-20T10:00:00Z"
+
+	// 1. Maintainer posts their own review comment and requests changes:
+	//    no unread update, stays in Waiting, baseline advances quietly.
+	ownComment := base
+	ownComment.ReviewComments++
+	ownComment.ReviewDecision = ReviewChangesRequested
+	res := Evaluate(Input{
+		Live:                  ownComment,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleWaiting,
+		Kind:                  KindPR,
+		Own:                   false,
+		HasActorData:          true,
+		AuthorReplies:         0,
+		OtherReplies:          0,
+		OwnReviewOnly:         true,
+		LatestOtherActivityAt: prevOther,
+		PrevOtherActivityAt:   prevOther,
+	})
+	if res.Track.HasUnread || res.MoveToRole != "" || res.NewCycle {
+		t.Fatalf("own review triggered unread/move: %+v", res)
+	}
+	if res.Track.Ack.ReviewComments != ownComment.ReviewComments || res.Track.Ack.ReviewDecision != ReviewChangesRequested {
+		t.Fatalf("ack did not quietly absorb own review: %+v", res.Track.Ack)
+	}
+	track = res.Track
+
+	// 2. Author replies in the review thread: moves to Updates with Maintainer wording.
+	authorReply := ownComment
+	authorReply.ReviewComments++
+	tReply := "2026-11-20T11:00:00Z"
+	res = Evaluate(Input{
+		Live:                  authorReply,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleWaiting,
+		Kind:                  KindPR,
+		Own:                   false,
+		HasActorData:          true,
+		AuthorReplies:         1,
+		LatestOtherActivityAt: tReply,
+		PrevOtherActivityAt:   prevOther,
+	})
+	if !res.Track.HasUnread || !res.NewCycle || res.MoveToRole != RoleUpdates || res.Track.Cycles != 1 {
+		t.Fatalf("author reply result = %+v", res)
+	}
+	if res.Track.Summary != "Author replied (+1)" {
+		t.Fatalf("summary = %q, want %q", res.Track.Summary, "Author replied (+1)")
+	}
+	track = res.Track
+	prevOther = tReply
+
+	// 3. Maintainer replies back without acknowledging yet: must NOT count as a 2nd cycle.
+	maintainerFollowup := authorReply
+	maintainerFollowup.ReviewComments++
+	res = Evaluate(Input{
+		Live:                  maintainerFollowup,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleInProgress,
+		Kind:                  KindPR,
+		Own:                   false,
+		HasActorData:          true,
+		AuthorReplies:         1,
+		LatestOtherActivityAt: tReply,
+		PrevOtherActivityAt:   prevOther,
+	})
+	if res.NewCycle || res.MoveToRole != "" || res.Track.Cycles != 1 {
+		t.Fatalf("own follow-up bumped cycle: %+v", res)
+	}
+	track = res.Track
+
+	// 4. Author pushes a new commit: 2nd cycle and moves back to Updates.
+	authorPush := maintainerFollowup
+	authorPush.Commits++
+	authorPush.HeadSHA = "bbb"
+	res = Evaluate(Input{
+		Live:                  authorPush,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleInProgress,
+		Kind:                  KindPR,
+		Own:                   false,
+		HasActorData:          true,
+		AuthorReplies:         1,
+		LatestOtherActivityAt: tReply,
+		PrevOtherActivityAt:   prevOther,
+	})
+	if !res.NewCycle || res.MoveToRole != RoleUpdates || res.Track.Cycles != 2 {
+		t.Fatalf("author push result = %+v", res)
+	}
+	if res.Track.Summary != "Author pushed +1 commit, Author replied (+1)" {
+		t.Fatalf("summary = %q", res.Track.Summary)
+	}
+}
+
+func TestOwnPRIgnoresOwnPushesAndCommentsAndTracksReviewers(t *testing.T) {
+	base := openPR()
+	track := Ack(base)
+	prevOther := "2026-11-20T10:00:00Z"
+
+	// 1. Author pushes commits and comments on their own PR: ignored cleanly.
+	ownPush := base
+	ownPush.Commits += 2
+	ownPush.HeadSHA = "bbb"
+	ownPush.Comments++
+	res := Evaluate(Input{
+		Live:                  ownPush,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleWaiting,
+		Kind:                  KindPR,
+		Own:                   true,
+		HasActorData:          true,
+		OtherReplies:          0,
+		LatestOtherActivityAt: prevOther,
+		PrevOtherActivityAt:   prevOther,
+	})
+	if res.Track.HasUnread || res.MoveToRole != "" || res.NewCycle {
+		t.Fatalf("own push/comment triggered unread: %+v", res)
+	}
+	if res.Track.Ack.HeadSHA != "bbb" || res.Track.Ack.Commits != ownPush.Commits {
+		t.Fatalf("own push did not advance ack baseline: %+v", res.Track.Ack)
+	}
+	track = res.Track
+
+	// 2. A reviewer leaves comments and requests changes: moves to Updates.
+	reviewed := ownPush
+	reviewed.ReviewComments += 2
+	reviewed.ReviewDecision = ReviewChangesRequested
+	tRev := "2026-11-20T12:00:00Z"
+	res = Evaluate(Input{
+		Live:                  reviewed,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleWaiting,
+		Kind:                  KindPR,
+		Own:                   true,
+		HasActorData:          true,
+		OtherReplies:          2,
+		LatestOtherActivityAt: tRev,
+		PrevOtherActivityAt:   prevOther,
+	})
+	if !res.Track.HasUnread || !res.NewCycle || res.MoveToRole != RoleUpdates {
+		t.Fatalf("reviewer update result = %+v", res)
+	}
+	if res.Track.Summary != "Reviewer commented (+2), Changes requested" {
+		t.Fatalf("summary = %q", res.Track.Summary)
+	}
+}
+
+func TestCountNewActivitiesAndInlineReviewComments(t *testing.T) {
+	me := "JesseStutler"
+	reviews := []ghReview{
+		{Author: ghAuthor{Login: me}, State: "COMMENTED", Body: "nit", SubmittedAt: "2026-11-20T10:05:00Z"},
+		{Author: ghAuthor{Login: "k8s-ci-robot"}, State: "COMMENTED", Body: "bot", SubmittedAt: "2026-11-20T10:06:00Z"},
+	}
+	comments := []ghComment{
+		{Author: ghAuthor{Login: "contrib"}, Body: "updated", CreatedAt: "2026-11-20T10:10:00Z"},
+		{Author: ghAuthor{Login: me}, Body: "thanks", CreatedAt: "2026-11-20T10:12:00Z"},
+	}
+	inline := []ghReviewComment{
+		{User: ghAuthor{Login: "contrib"}, CreatedAt: "2026-11-20T10:15:00Z"},
+		{User: ghAuthor{Login: "other-reviewer"}, CreatedAt: "2026-11-20T10:16:00Z"},
+		{User: ghAuthor{Login: me}, CreatedAt: "2026-11-20T10:20:00Z"},
+	}
+
+	if got := lastOtherActivity(me, reviews, comments, inline...); got != "2026-11-20T10:16:00Z" {
+		t.Fatalf("lastOtherActivity = %q, want inline comment timestamp", got)
+	}
+	acts := otherActivities(me, reviews, comments, inline)
+	authorN, otherN := CountNewActivities(acts, "contrib", "2026-11-20T10:00:00Z", false)
+	if authorN != 2 || otherN != 1 {
+		t.Fatalf("CountNewActivities = (%d, %d), want (2, 1)", authorN, otherN)
+	}
+}
+
 func TestColumnsOutsideTheAutomationFlowAreLeftAlone(t *testing.T) {
 	for _, role := range []string{"", RoleDone} {
 		tr := newTracker(t, role)

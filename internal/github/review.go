@@ -47,6 +47,19 @@ type ghComment struct {
 	CreatedAt string   `json:"createdAt"`
 }
 
+type ghReviewComment struct {
+	User      ghAuthor `json:"user"`
+	CreatedAt string   `json:"created_at"`
+}
+
+// Activity is a single human comment, inline review comment, or submitted
+// review written by someone other than the board's current user.
+type Activity struct {
+	Author string
+	At     string
+	Kind   string
+}
+
 type ghCommit struct {
 	OID           string `json:"oid"`
 	CommittedDate string `json:"committedDate"`
@@ -80,6 +93,18 @@ func After(a, b string) bool {
 	}
 	tb, ok := parseTime(b)
 	return !ok || ta.After(tb)
+}
+
+// LatestTime returns the newest valid RFC 3339 timestamp among ts, or "".
+func LatestTime(ts ...string) string {
+	var best time.Time
+	raw := ""
+	for _, s := range ts {
+		if t, ok := parseTime(s); ok && t.After(best) {
+			best, raw = t, s
+		}
+	}
+	return raw
 }
 
 // prowCommand matches the Prow review commands. Like Prow, it only accepts a
@@ -188,9 +213,10 @@ func myReview(user string, reviews []ghReview, comments []ghComment) MyReview {
 	return out
 }
 
-// lastOtherActivity returns the time of the newest comment or submitted
-// review written by a person other than user, or "" when there is none.
-func lastOtherActivity(user string, reviews []ghReview, comments []ghComment) string {
+// lastOtherActivity returns the time of the newest comment, inline review
+// comment, or submitted review written by a person other than user, or ""
+// when there is none.
+func lastOtherActivity(user string, reviews []ghReview, comments []ghComment, reviewComments ...ghReviewComment) string {
 	var latest time.Time
 	raw := ""
 	consider := func(login, at string) {
@@ -209,7 +235,66 @@ func lastOtherActivity(user string, reviews []ghReview, comments []ghComment) st
 	for _, cm := range comments {
 		consider(cm.Author.Login, cm.CreatedAt)
 	}
+	for _, rc := range reviewComments {
+		consider(rc.User.Login, rc.CreatedAt)
+	}
 	return raw
+}
+
+// otherActivities collects non-self, non-bot comments, inline review comments,
+// and submitted reviews with a body or decision. Returns nil when user is
+// unknown so callers fall back to raw comment counts.
+func otherActivities(user string, reviews []ghReview, comments []ghComment, reviewComments []ghReviewComment) []Activity {
+	if user == "" {
+		return nil
+	}
+	out := make([]Activity, 0, len(comments)+len(reviewComments)+len(reviews))
+	for _, rv := range reviews {
+		state := strings.ToUpper(rv.State)
+		if state == "PENDING" || sameUser(rv.Author.Login, user) || isBot(rv.Author.Login) {
+			continue
+		}
+		if strings.TrimSpace(rv.Body) == "" && state != ReviewApproved && state != ReviewChangesRequested {
+			continue
+		}
+		if _, ok := parseTime(rv.SubmittedAt); ok {
+			out = append(out, Activity{Author: rv.Author.Login, At: rv.SubmittedAt, Kind: "review"})
+		}
+	}
+	for _, cm := range comments {
+		if sameUser(cm.Author.Login, user) || isBot(cm.Author.Login) {
+			continue
+		}
+		if _, ok := parseTime(cm.CreatedAt); ok {
+			out = append(out, Activity{Author: cm.Author.Login, At: cm.CreatedAt, Kind: "comment"})
+		}
+	}
+	for _, rc := range reviewComments {
+		if sameUser(rc.User.Login, user) || isBot(rc.User.Login) {
+			continue
+		}
+		if _, ok := parseTime(rc.CreatedAt); ok {
+			out = append(out, Activity{Author: rc.User.Login, At: rc.CreatedAt, Kind: "review_comment"})
+		}
+	}
+	return out
+}
+
+// CountNewActivities counts non-self human activities strictly after since,
+// splitting replies from the PR/issue author (when reviewing someone else's
+// item) from replies by other participants.
+func CountNewActivities(activities []Activity, itemAuthor, since string, own bool) (authorReplies, otherReplies int) {
+	for _, a := range activities {
+		if !After(a.At, since) {
+			continue
+		}
+		if !own && sameUser(a.Author, itemAuthor) {
+			authorReplies++
+		} else {
+			otherReplies++
+		}
+	}
+	return authorReplies, otherReplies
 }
 
 func lastCommitTime(commits []ghCommit) string {

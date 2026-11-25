@@ -43,6 +43,12 @@ type Item struct {
 	// LastOtherActivityAt is the time of the newest comment or review by a
 	// person other than the current user; bots do not count.
 	LastOtherActivityAt string
+	// HasActorData is true when the current user was known during fetch and
+	// OtherActivities contains the actor-filtered human activity list.
+	HasActorData bool
+	// OtherActivities lists all non-self, non-bot comments, inline review
+	// comments, and submitted reviews on the item.
+	OtherActivities []Activity
 }
 
 // Runner executes gh with args and returns its standard output.
@@ -257,7 +263,17 @@ func (c *Client) Fetch(ctx context.Context, repo string, number int, knownKind s
 	if err != nil {
 		return nil, err
 	}
-	item, err := c.parsePR(view, rest)
+	var inlineComments []ghReviewComment
+	var rCheck struct {
+		ReviewComments int `json:"review_comments"`
+	}
+	_ = json.Unmarshal(rest, &rCheck)
+	if rCheck.ReviewComments > 0 && c.User() != "" {
+		if rcOut, err := c.run(ctx, "api", "--paginate", "--slurp", fmt.Sprintf("repos/%s/pulls/%d/comments?per_page=100", repo, number)); err == nil {
+			inlineComments = parseReviewComments(rcOut)
+		}
+	}
+	item, err := c.parsePR(view, rest, inlineComments...)
 	if err != nil {
 		return nil, err
 	}
@@ -332,9 +348,27 @@ func hasLabel(labels []string, name string) bool {
 	return false
 }
 
+// parseReviewComments decodes either a single JSON array or the nested array
+// returned by `gh api --paginate --slurp`.
+func parseReviewComments(data []byte) []ghReviewComment {
+	var pages [][]ghReviewComment
+	if err := json.Unmarshal(data, &pages); err == nil {
+		var out []ghReviewComment
+		for _, p := range pages {
+			out = append(out, p...)
+		}
+		return out
+	}
+	var flat []ghReviewComment
+	if err := json.Unmarshal(data, &flat); err == nil {
+		return flat
+	}
+	return nil
+}
+
 // parsePR combines `gh pr view --json` output with the REST pulls payload,
 // which supplies exact commit, comment and inline review comment counts.
-func (c *Client) parsePR(view, rest []byte) (*Item, error) {
+func (c *Client) parsePR(view, rest []byte, inlineComments ...ghReviewComment) (*Item, error) {
 	var v ghPRView
 	if err := json.Unmarshal(view, &v); err != nil {
 		return nil, fmt.Errorf("decode gh pr view: %w", err)
@@ -392,7 +426,11 @@ func (c *Client) parsePR(view, rest []byte) (*Item, error) {
 		item.MyReview = myReview(user, v.Reviews, v.Comments)
 	}
 	item.LastCommitAt = lastCommitTime(v.Commits)
-	item.LastOtherActivityAt = lastOtherActivity(user, v.Reviews, v.Comments)
+	item.LastOtherActivityAt = lastOtherActivity(user, v.Reviews, v.Comments, inlineComments...)
+	if user != "" && (r.ReviewComments == 0 || len(inlineComments) > 0) {
+		item.HasActorData = true
+		item.OtherActivities = otherActivities(user, v.Reviews, v.Comments, inlineComments)
+	}
 	return item, nil
 }
 
@@ -417,7 +455,8 @@ func (c *Client) parseIssueView(data []byte) (*Item, error) {
 	if strings.EqualFold(v.State, StateClosed) {
 		state = StateClosed
 	}
-	return &Item{
+	user := c.User()
+	item := &Item{
 		Kind:              KindIssue,
 		Title:             v.Title,
 		URL:               v.URL,
@@ -430,8 +469,13 @@ func (c *Client) parseIssueView(data []byte) (*Item, error) {
 			Comments:  len(v.Comments),
 			UpdatedAt: v.UpdatedAt,
 		},
-		LastOtherActivityAt: lastOtherActivity(c.User(), nil, v.Comments),
-	}, nil
+		LastOtherActivityAt: lastOtherActivity(user, nil, v.Comments),
+	}
+	if user != "" {
+		item.HasActorData = true
+		item.OtherActivities = otherActivities(user, nil, v.Comments, nil)
+	}
+	return item, nil
 }
 
 // RollupCI folds check runs and status contexts into one status. Any failure

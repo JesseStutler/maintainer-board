@@ -207,6 +207,8 @@ CREATE TABLE IF NOT EXISTS content_index_state (
 	updated_at    TEXT NOT NULL
 );
 `,
+	// 4: non-self GitHub activity timestamps for role-aware update tracking; see migrationSteps.
+	"",
 }
 
 // columnDef is a column added to an existing table by a migration.
@@ -225,6 +227,14 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 			{"cards", "gh_my_review_state", "TEXT NOT NULL DEFAULT ''"},
 			{"cards", "gh_my_reviewed_at", "TEXT NOT NULL DEFAULT ''"},
 			{"cards", "gh_is_stale_review", "INTEGER NOT NULL DEFAULT 0"},
+		})
+	},
+	// 4: timestamps of the latest non-self GitHub activity acknowledged and
+	// previously polled, so own comments and pushes never trigger unread updates.
+	3: func(ctx context.Context, tx *sql.Tx) error {
+		return addColumns(ctx, tx, []columnDef{
+			{"cards", "ack_other_activity_at", "TEXT NOT NULL DEFAULT ''"},
+			{"cards", "prev_other_activity_at", "TEXT NOT NULL DEFAULT ''"},
 		})
 	},
 }
