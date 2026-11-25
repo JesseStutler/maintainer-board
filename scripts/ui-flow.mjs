@@ -262,7 +262,7 @@ try {
       await page.sleep(200);
       await page.click('#btn-ai-search');
       await page.waitFor(`document.querySelector('.search-banner.is-running')`, 5000, 'running banner');
-      if (!(await page.eval(`document.getElementById('btn-ai-search').disabled && Boolean(document.querySelector('#btn-ai-search .spin'))`))) throw new Error('no spinner on the AI Search button while it runs');
+      if (!(await page.eval(`document.getElementById('btn-ai-search').disabled && Boolean(document.querySelector('#btn-ai-search .spinner')) && document.querySelector('#btn-ai-search').textContent.trim() === 'Searching with AI...'`))) throw new Error('no spinner on the AI Search button while it runs');
       await page.waitFor(`document.querySelector('.search-banner.is-done, .search-banner.is-error')`, 240000, 'AI search to finish');
       const banner = await page.eval(`({ cls: document.getElementById('search-banner').className, text: document.querySelector('#search-banner .banner-text').textContent })`);
       if (!banner.cls.includes('is-done')) throw new Error(banner.text);

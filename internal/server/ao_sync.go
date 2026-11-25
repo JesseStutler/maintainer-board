@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"maintainer-board/internal/ao"
@@ -670,49 +671,6 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 
 // Import
 
-type importCandidateView struct {
-	ao.ImportCandidate
-	// CardID is set when the already imported session has a card.
-	CardID string `json:"cardId"`
-}
-
-func (s *Server) handleImportCandidates(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	candidates, err := s.ao.ImportCandidates(ctx)
-	if err != nil {
-		s.writeAOError(w, err)
-		return
-	}
-	cards, err := s.store.ListCards(ctx)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	linked := map[string]string{}
-	for _, c := range cards {
-		if c.AOSessionID != "" {
-			linked[c.AOSessionID] = c.ID
-		}
-	}
-	out := make([]importCandidateView, 0, len(candidates))
-	for _, c := range candidates {
-		if isSummarizerRun(c.Title) {
-			continue
-		}
-		out = append(out, importCandidateView{ImportCandidate: c, CardID: linked[c.SessionID]})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
-}
-
-// isSummarizerRun reports whether a history entry is one of the board's own
-// AI summary or AI search runs rather than a real working session. AO may shorten titles,
-// so only a prefix of the prompt marker is compared.
-func isSummarizerRun(title string) bool {
-	title = strings.TrimSpace(title)
-	return strings.HasPrefix(title, summary.PromptMarker[:40]) || strings.HasPrefix(title, summary.SearchPromptMarker[:40])
-}
-
 type importResultView struct {
 	ao.ImportResult
 	CardID string `json:"cardId"`
@@ -745,6 +703,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.aoSyncMu.Unlock()
+	s.forgetImportCandidates()
 	if err != nil {
 		s.writeAOError(w, err)
 		return
@@ -801,6 +760,68 @@ func githubContext(c *db.Card) string {
 	return strings.Join(parts, ", ")
 }
 
+// describer is implemented by GitHub clients that can fetch the body of a
+// pull request or issue.
+type describer interface {
+	Description(ctx context.Context, repo string, number int) (string, error)
+}
+
+// summaryOpeningWindow is how many of the first conversation items are
+// read for a summary: the opening requests say what the card is about.
+const (
+	summaryOpeningWindow = 40
+	summaryRecentTurns   = 12
+)
+
+// summaryInput collects what the AI summary is built on: the linked GitHub
+// item with its description, the notes, and the opening of the session
+// conversation. The latest turns are added only when the rest is too thin
+// to tell what the card is about.
+func (s *Server) summaryInput(ctx context.Context, card *db.Card) summary.Input {
+	in := summary.Input{Title: card.Title, GitHub: githubContext(card), Notes: card.Notes}
+	var wg sync.WaitGroup
+	description := ""
+	if d, ok := s.gh.(describer); ok && card.GHNumber != 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			body, err := d.Description(dctx, card.GHRepo, card.GHNumber)
+			if err != nil {
+				s.log.Debug("summarize: description unavailable", "card", card.ID, "err", err)
+				return
+			}
+			description = body
+		}()
+	}
+	whole := true
+	if card.AOSessionID != "" {
+		// AO pages backwards from a sequence number, so asking for what
+		// precedes item 41 yields the first 40 items.
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		conv, err := s.ao.Conversation(cctx, card.AOSessionID, ao.ConversationQuery{Limit: summaryOpeningWindow, BeforeSequence: summaryOpeningWindow + 1})
+		cancel()
+		if err == nil {
+			in.Turns = conversationTurns(conv)
+			whole = conv.LatestSequence <= summaryOpeningWindow
+		} else {
+			s.log.Warn("summarize: conversation unavailable", "session", card.AOSessionID, "err", err)
+		}
+	}
+	wg.Wait()
+	in.Description = description
+	if card.AOSessionID != "" && !whole && summary.NeedsRecent(in) {
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		conv, err := s.ao.Conversation(cctx, card.AOSessionID, ao.ConversationQuery{Limit: summaryRecentTurns})
+		cancel()
+		if err == nil {
+			in.Recent = conversationTurns(conv)
+		}
+	}
+	return in
+}
+
 func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
@@ -809,18 +830,8 @@ func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	in := summary.Input{Title: card.Title, GitHub: githubContext(card), Notes: card.Notes}
-	if card.AOSessionID != "" {
-		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		conv, err := s.ao.Conversation(cctx, card.AOSessionID, ao.ConversationQuery{Limit: 40})
-		cancel()
-		if err == nil {
-			in.Turns = conversationTurns(conv)
-		} else {
-			s.log.Warn("summarize: conversation unavailable", "session", card.AOSessionID, "err", err)
-		}
-	}
-	if len(in.Turns) == 0 && in.GitHub == "" && strings.TrimSpace(in.Notes) == "" {
+	in := s.summaryInput(ctx, card)
+	if len(in.Turns) == 0 && len(in.Recent) == 0 && in.GitHub == "" && strings.TrimSpace(in.Notes) == "" {
 		writeError(w, http.StatusConflict, "NOTHING_TO_SUMMARIZE", "There is nothing to summarize yet. Link an agent session or a pull request or issue, or add notes first.")
 		return
 	}

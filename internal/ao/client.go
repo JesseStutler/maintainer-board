@@ -48,6 +48,8 @@ type Client struct {
 	http    *http.Client
 	// stream serves the long-lived event stream.
 	stream *http.Client
+	// deleteRetryDelay is the base of the backoff between delete attempts.
+	deleteRetryDelay time.Duration
 }
 
 func New(baseURL string) *Client {
@@ -55,6 +57,8 @@ func New(baseURL string) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    &http.Client{},
 		stream:  &http.Client{},
+
+		deleteRetryDelay: 400 * time.Millisecond,
 	}
 }
 
@@ -208,6 +212,59 @@ func (c *Client) Resume(ctx context.Context, sessionID string) (*Session, error)
 
 func (c *Client) Kill(ctx context.Context, sessionID string) error {
 	return c.do(ctx, http.MethodPost, sessionPath(sessionID, "/kill"), struct{}{}, nil)
+}
+
+// HasStatus reports whether err is an APIError with the given HTTP status.
+func HasStatus(err error, status int) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == status
+}
+
+// transientDeleteCodes are the 409 answers to a delete that go away by
+// themselves: AO tears a killed session down in the background.
+var transientDeleteCodes = map[string]bool{
+	"SESSION_NOT_TERMINATED":        true,
+	"SESSION_BUSY":                  true,
+	"SESSION_OPERATION_IN_PROGRESS": true,
+	"AGENT_EXIT_IN_PROGRESS":        true,
+	"WORKSPACE_NOT_RELEASED":        true,
+}
+
+const deleteAttempts = 6
+
+// DeleteSession permanently removes a session from AO: its record and its
+// AO history (conversation, PR facts, attachments and artifacts). AO only
+// deletes a terminated session whose workspace is released, so the session
+// is killed first; a kill that answers 404 (unknown) or 409 (already
+// terminated, or busy) is not an error by itself, the delete decides.
+//
+// With cleanup true AO removes a worktree that is still on disk before
+// deleting. It never forces that: a dirty or locked worktree makes AO
+// answer 409 (WORKSPACE_DIRTY, WORKSPACE_LOCKED), which is returned as is
+// so that no uncommitted work is lost. While AO is still tearing the
+// killed session down the delete is repeated for a few seconds. A session
+// AO no longer knows (404) counts as deleted.
+func (c *Client) DeleteSession(ctx context.Context, sessionID string, cleanup bool) error {
+	if err := c.Kill(ctx, sessionID); err != nil && !HasStatus(err, http.StatusNotFound) && !HasStatus(err, http.StatusConflict) {
+		return err
+	}
+	path := sessionPath(sessionID, "?cleanup="+strconv.FormatBool(cleanup))
+	var err error
+	for attempt := 1; ; attempt++ {
+		err = c.do(ctx, http.MethodDelete, path, nil, nil)
+		if err == nil || HasStatus(err, http.StatusNotFound) {
+			return nil
+		}
+		var apiErr *APIError
+		if attempt == deleteAttempts || !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict || !transientDeleteCodes[apiErr.Code] {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(attempt) * c.deleteRetryDelay):
+		}
+	}
 }
 
 func (c *Client) Rename(ctx context.Context, sessionID, displayName string) error {

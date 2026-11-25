@@ -20,6 +20,7 @@ import (
 	"maintainer-board/internal/ao"
 	"maintainer-board/internal/db"
 	"maintainer-board/internal/github"
+	"maintainer-board/internal/history"
 	"maintainer-board/internal/summary"
 )
 
@@ -33,6 +34,8 @@ type AOClient interface {
 	Interrupt(ctx context.Context, sessionID string) error
 	Resume(ctx context.Context, sessionID string) (*ao.Session, error)
 	Kill(ctx context.Context, sessionID string) error
+	// DeleteSession kills a session and permanently removes it from AO.
+	DeleteSession(ctx context.Context, sessionID string, cleanup bool) error
 	Rename(ctx context.Context, sessionID, displayName string) error
 	ImportCandidates(ctx context.Context) ([]ao.ImportCandidate, error)
 	Import(ctx context.Context, ids []string) ([]ao.ImportResult, error)
@@ -59,6 +62,13 @@ type userResolver interface {
 type Summarizer interface {
 	Summarize(ctx context.Context, in summary.Input) (text, engine string, err error)
 	Search(ctx context.Context, in summary.SearchInput) (matches []summary.SearchMatch, engine string, err error)
+	SearchHistory(ctx context.Context, in summary.HistoryInput) (matches []summary.HistoryMatch, engine string, err error)
+}
+
+// HistoryIndex reads the local Copilot and Codex session stores, keyed by
+// AO import candidate ID.
+type HistoryIndex interface {
+	Sessions(ctx context.Context) map[string]*history.Session
 }
 
 type Config struct {
@@ -78,6 +88,13 @@ type Config struct {
 	// CurrentUser is the GitHub login of the maintainer. Empty means the
 	// GitHub client is asked, which detects it through gh.
 	CurrentUser string
+	// History enriches and searches the import history with what the local
+	// Copilot and Codex stores know. Nil leaves the AO list as it is.
+	History HistoryIndex
+	// HelperDir is the scratch directory the AI CLIs run in. A local session
+	// that ran there is one of the board's own summary or search runs,
+	// whatever its prompt was, and stays out of the import history.
+	HelperDir string
 }
 
 type Server struct {
@@ -116,6 +133,12 @@ type Server struct {
 	index         contentIndex
 	indexRequests chan struct{}
 	aiSearchMu    sync.Mutex
+
+	// candidates caches AO's import list for the search-as-you-type
+	// endpoint; see importCandidates.
+	candidatesMu sync.Mutex
+	candidates   []ao.ImportCandidate
+	candidatesAt time.Time
 
 	bg sync.WaitGroup
 	// bgCtx is cancelled on shutdown; background work started by handlers
@@ -221,6 +244,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/cards/{id}/unreview", s.handleUnreview)
 	mux.HandleFunc("POST /api/cards/{id}/summarize", s.handleSummarize)
 	mux.HandleFunc("POST /api/cards/{id}/session", s.handleStartSession)
+	mux.HandleFunc("DELETE /api/cards/{id}/session", s.handleDeleteCardSession)
+	mux.HandleFunc("POST /api/cards/{id}/unlink", s.handleUnlinkSession)
 	mux.HandleFunc("GET /api/cards/{id}/models", s.handleCardModels)
 	mux.HandleFunc("PATCH /api/cards/{id}/settings", s.handleCardSettings)
 
@@ -239,6 +264,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/resume", s.handleResume)
 	mux.HandleFunc("POST /api/sessions/{id}/kill", s.handleKill)
 
+	mux.HandleFunc("GET /api/ao/import-history", s.handleImportCandidates)
+	mux.HandleFunc("GET /api/ao/import-history/search", s.handleImportSearch)
+	mux.HandleFunc("POST /api/ao/import-history/ai-search", s.handleImportAISearch)
+	// The path of the first release; same answer as /api/ao/import-history.
 	mux.HandleFunc("GET /api/import/candidates", s.handleImportCandidates)
 	mux.HandleFunc("POST /api/import", s.handleImport)
 
@@ -389,19 +418,25 @@ var aoErrorMessages = map[string]string{
 	"SESSION_IMPORT_RESUME_TIMEOUT": "AO timed out while resuming the imported session. Try again.",
 	"AGENT_EXIT_IN_PROGRESS":        "The agent is still shutting down. Try again in a moment.",
 	"CHAT_NO_ACTIVE_TURN":           "There is no running turn to interrupt.",
+	"SESSION_NOT_TERMINATED":        "AO is still shutting the session down, so it could not be deleted yet. Try again in a moment.",
+	"WORKSPACE_NOT_RELEASED":        "AO has not released the workspace of this session yet, so it could not be deleted. Try again in a moment.",
+	"WORKSPACE_DIRTY":               "The worktree of this session has uncommitted changes, so AO refused to delete it. Commit or discard them (or run 'ao session cleanup'), then delete again.",
+	"WORKSPACE_LOCKED":              "The worktree of this session is locked, so AO refused to delete it. Unlock it (git worktree unlock), then delete again.",
+	"SESSION_DELETE_UNSUPPORTED":    "This AO version cannot delete this kind of session.",
 }
 
-// writeAOError maps AO client errors to HTTP responses, keeping AO's error
-// code so the UI can react to specific conditions.
-func (s *Server) writeAOError(w http.ResponseWriter, err error) {
+// aoErrorResponse maps an AO client error to an HTTP status, an error code
+// and a message, keeping AO's own code so the UI can react to specific
+// conditions.
+func (s *Server) aoErrorResponse(err error) (status int, code, msg string) {
 	var apiErr *ao.APIError
 	switch {
 	case errors.As(err, &apiErr):
-		status := apiErr.Status
+		status = apiErr.Status
 		if status >= 500 || status < 400 {
 			status = http.StatusBadGateway
 		}
-		code := apiErr.Code
+		code = apiErr.Code
 		if code == "" {
 			code = "AO_ERROR"
 		}
@@ -412,15 +447,21 @@ func (s *Server) writeAOError(w http.ResponseWriter, err error) {
 				msg = fmt.Sprintf("AO returned HTTP %d.", apiErr.Status)
 			}
 		}
-		writeError(w, status, code, msg)
+		return status, code, msg
 	case errors.Is(err, ao.ErrUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "AO_OFFLINE", fmt.Sprintf("The AO daemon is not reachable at %s.", s.cfg.AOURL))
+		return http.StatusServiceUnavailable, "AO_OFFLINE", fmt.Sprintf("The AO daemon is not reachable at %s.", s.cfg.AOURL)
 	case errors.Is(err, context.DeadlineExceeded):
-		writeError(w, http.StatusGatewayTimeout, "AO_TIMEOUT", "The AO daemon did not answer in time.")
+		return http.StatusGatewayTimeout, "AO_TIMEOUT", "The AO daemon did not answer in time."
 	default:
 		s.log.Error("ao error", "err", err)
-		writeError(w, http.StatusBadGateway, "AO_ERROR", err.Error())
+		return http.StatusBadGateway, "AO_ERROR", err.Error()
 	}
+}
+
+// writeAOError answers a request with what aoErrorResponse makes of err.
+func (s *Server) writeAOError(w http.ResponseWriter, err error) {
+	status, code, msg := s.aoErrorResponse(err)
+	writeError(w, status, code, msg)
 }
 
 // hub fans board-changed notifications out to SSE subscribers.

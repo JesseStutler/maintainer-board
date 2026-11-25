@@ -52,6 +52,13 @@ export function cardPath(id, suffix = '') {
   return `/api/cards/${encodeURIComponent(id)}${suffix}`;
 }
 
+/** Import History: AO's candidates, enriched from the local session stores. */
+export const importHistory = {
+  list: () => request('GET', '/api/ao/import-history'),
+  search: (query) => request('GET', `/api/ao/import-history/search?q=${encodeURIComponent(query)}`),
+  aiSearch: (query) => request('POST', '/api/ao/import-history/ai-search', { query }),
+};
+
 export function sessionPath(id, suffix = '') {
   return `/api/sessions/${encodeURIComponent(id)}${suffix}`;
 }

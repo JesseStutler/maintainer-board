@@ -435,3 +435,105 @@ func TestEventsStream(t *testing.T) {
 		t.Fatalf("missing stream: err = %v", err)
 	}
 }
+
+func TestDeleteSession(t *testing.T) {
+	const dirty = `{"error":"conflict","code":"WORKSPACE_DIRTY","message":"worktree has uncommitted changes"}`
+	const pending = `{"error":"conflict","code":"WORKSPACE_NOT_RELEASED","message":"workspace is still being released"}`
+	const gone = `{"error":"not_found","code":"SESSION_NOT_FOUND","message":"session not found"}`
+	cases := []struct {
+		name    string
+		cleanup bool
+		kill    []string // status and body of each kill answer
+		deletes []string // status and body of each delete answer, the last one repeats
+		wantErr string
+		want    []string
+	}{
+		{"kill, then delete with cleanup", true, []string{`200 {"ok":true,"sessionId":"volcano-9"}`}, []string{`200 {"ok":true,"sessionId":"volcano-9"}`}, "",
+			[]string{"POST /api/v1/sessions/volcano-9/kill", "DELETE /api/v1/sessions/volcano-9?cleanup=true"}},
+		{"cleanup can be turned off", false, []string{`200 {}`}, []string{`200 {}`}, "",
+			[]string{"POST /api/v1/sessions/volcano-9/kill", "DELETE /api/v1/sessions/volcano-9?cleanup=false"}},
+		{"an already terminated session is deleted without a kill error", true,
+			[]string{`409 {"error":"conflict","code":"SESSION_TERMINATED","message":"session is already terminated"}`}, []string{`200 {}`}, "",
+			[]string{"POST /api/v1/sessions/volcano-9/kill", "DELETE /api/v1/sessions/volcano-9?cleanup=true"}},
+		{"a session AO no longer knows counts as deleted", true, []string{"404 " + gone}, []string{"404 " + gone}, "",
+			[]string{"POST /api/v1/sessions/volcano-9/kill", "DELETE /api/v1/sessions/volcano-9?cleanup=true"}},
+		{"a dirty worktree is never forced and not retried", true, []string{`200 {}`}, []string{"409 " + dirty},
+			"ao: worktree has uncommitted changes (WORKSPACE_DIRTY, HTTP 409)",
+			[]string{"POST /api/v1/sessions/volcano-9/kill", "DELETE /api/v1/sessions/volcano-9?cleanup=true"}},
+		{"the delete waits for AO to release the workspace", true, []string{`200 {"ok":true,"cleanupPending":true}`}, []string{"409 " + pending, "409 " + pending, `200 {}`}, "",
+			[]string{"POST /api/v1/sessions/volcano-9/kill", "DELETE /api/v1/sessions/volcano-9?cleanup=true", "DELETE /api/v1/sessions/volcano-9?cleanup=true", "DELETE /api/v1/sessions/volcano-9?cleanup=true"}},
+		{"a workspace that is never released ends in the conflict", true, []string{`200 {}`}, []string{"409 " + pending},
+			"ao: workspace is still being released (WORKSPACE_NOT_RELEASED, HTTP 409)",
+			append([]string{"POST /api/v1/sessions/volcano-9/kill"}, repeat("DELETE /api/v1/sessions/volcano-9?cleanup=true", deleteAttempts)...)},
+		{"a failed kill stops before the delete", true, []string{`500 {"error":"internal","message":"runtime teardown failed"}`}, nil,
+			"ao: runtime teardown failed (HTTP 500)", []string{"POST /api/v1/sessions/volcano-9/kill"}},
+	}
+	for _, tc := range cases {
+		kills, deletes := 0, 0
+		answer := func(list []string, n *int) func(w http.ResponseWriter, r *http.Request) {
+			return func(w http.ResponseWriter, r *http.Request) {
+				reply := list[min(*n, len(list)-1)]
+				*n++
+				var status int
+				var body string
+				fmt.Sscanf(reply, "%d", &status)
+				_, body, _ = strings.Cut(reply, " ")
+				respond(status, body)(w, r)
+			}
+		}
+		routes := map[string]func(w http.ResponseWriter, r *http.Request){"POST /api/v1/sessions/volcano-9/kill": answer(tc.kill, &kills)}
+		if tc.deletes != nil {
+			routes["DELETE /api/v1/sessions/volcano-9"] = answer(tc.deletes, &deletes)
+		}
+		c, calls := fakeDaemon(t, routes)
+		c.deleteRetryDelay = time.Millisecond
+		err := c.DeleteSession(context.Background(), "volcano-9", tc.cleanup)
+		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
+		}
+		var got []string
+		for _, call := range *calls {
+			line := call.Method + " " + call.Path
+			if call.Query != "" {
+				line += "?" + call.Query
+			}
+			got = append(got, line)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: calls = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// The conflict keeps AO's code, so the board can explain it.
+	c, _ := fakeDaemon(t, map[string]func(w http.ResponseWriter, r *http.Request){
+		"POST /api/v1/sessions/volcano-9/kill": respond(200, `{}`),
+		"DELETE /api/v1/sessions/volcano-9":    respond(409, dirty),
+	})
+	err := c.DeleteSession(context.Background(), "volcano-9", true)
+	if !IsCode(err, "WORKSPACE_DIRTY") || !HasStatus(err, http.StatusConflict) || HasStatus(err, http.StatusNotFound) {
+		t.Errorf("dirty worktree error = %v", err)
+	}
+
+	// A cancelled context ends the wait for a pending cleanup.
+	c, calls := fakeDaemon(t, map[string]func(w http.ResponseWriter, r *http.Request){
+		"POST /api/v1/sessions/volcano-9/kill": respond(200, `{}`),
+		"DELETE /api/v1/sessions/volcano-9":    respond(409, pending),
+	})
+	c.deleteRetryDelay = time.Hour
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := c.DeleteSession(ctx, "volcano-9", true); !IsCode(err, "WORKSPACE_NOT_RELEASED") {
+		t.Errorf("cancelled wait: err = %v", err)
+	}
+	if len(*calls) != 2 {
+		t.Errorf("cancelled wait: %d calls, want 2", len(*calls))
+	}
+}
+
+func repeat(s string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = s
+	}
+	return out
+}

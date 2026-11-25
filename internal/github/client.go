@@ -197,6 +197,30 @@ func parseKind(data []byte) (string, error) {
 	return KindIssue, nil
 }
 
+// Description returns the body of the pull request or issue repo#number:
+// what its author wrote that it is about. The REST issues endpoint serves
+// both kinds.
+func (c *Client) Description(ctx context.Context, repo string, number int) (string, error) {
+	if !ValidRepo(repo) || number <= 0 {
+		return "", fmt.Errorf("%w: %s#%d", ErrBadRef, repo, number)
+	}
+	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/issues/%d", repo, number))
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Number int    `json:"number"`
+		Body   string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return "", fmt.Errorf("decode issue lookup: %w", err)
+	}
+	if v.Number == 0 {
+		return "", ErrNotFound
+	}
+	return strings.TrimSpace(v.Body), nil
+}
+
 // Fetch returns the live state of repo#number. knownKind is the kind stored
 // from an earlier fetch; when empty the kind is detected first.
 func (c *Client) Fetch(ctx context.Context, repo string, number int, knownKind string) (*Item, error) {

@@ -357,7 +357,9 @@ try {
         };
       })()`);
       if (info.width < WIDTH * 0.96) throw new Error(`workspace is ${info.width}px wide`);
-      if (info.toggle !== 'Split Board' || info.back !== 'Back to Board') throw new Error(`buttons read ${info.toggle} / ${info.back}`);
+      // The workspace is left through Collapse (back to the drawer); Close
+      // is a plain X, there is no "Back to Board" any more.
+      if (info.toggle !== 'Collapse' || info.back !== '') throw new Error(`buttons read ${info.toggle} / ${info.back}`);
       if (!info.controls || info.controlsInHeader) throw new Error('the controls did not move into the context rail');
       if (info.handle !== 'none') throw new Error('the resize handle is still shown');
       for (const name of ['Summary', 'GitHub Tracking', 'Maintainer Notes', 'Controls']) if (!info.sections.includes(name)) throw new Error(`rail lacks ${name}: ${info.sections}`);
@@ -460,7 +462,7 @@ try {
       await page.waitFor(`document.querySelector('.drawer.is-expanded')`);
       await page.sleep(400);
       await page.screenshot(`${out}/11-workspace-light.png`);
-      // "Back to Board" closes the workspace in one click.
+      // Close leaves the workspace for the board in one click.
       await page.click('.drawer-top button[aria-label="Close"]');
       await page.waitFor(`!document.querySelector('.drawer') && !document.body.classList.contains('drawer-expanded')`);
       return `Copilot ${colors.copilot || 'n/a'}, Codex ${colors.codex || 'n/a'}`;
@@ -503,12 +505,31 @@ try {
   await page.screenshot(`${out}/06-new-task.png`);
   await page.click('.modal-head button[aria-label="Close"]');
 
-  await step('import dialog lists history', async () => {
+  await step('import dialog lists history with search and AI Search', async () => {
     await page.click('#btn-import');
     await page.waitFor(`document.querySelector('.import-row, .import-state')`);
     await page.waitFor(`!document.querySelector('.import-state') || !document.querySelector('.import-state').textContent.includes('Scanning')`, 60000, 'import scan');
+    const ui = await page.eval(`({ placeholder: document.querySelector('.import-search input').placeholder, ai: document.querySelector('.import-ai').textContent.trim(),
+      pills: Array.from(document.querySelectorAll('.import-harness button')).map((b) => b.textContent).join(','), rows: document.querySelectorAll('.import-row:not(.is-head)').length,
+      titles: Array.from(document.querySelectorAll('.import-row:not(.is-head) .import-title')).map((t) => t.textContent), chips: document.querySelectorAll('.import-row .id-chip:not(.is-ao)').length })`);
+    if (ui.placeholder !== 'Search by session ID, title, topic, or past prompt...' || ui.ai !== 'AI Search' || ui.pills !== 'All,Copilot,Codex') throw new Error(`search row: ${JSON.stringify(ui)}`);
+    // The board's own summary and search runs never show up as history.
+    const internal = ui.titles.filter((t) => /^(\[maintainer-board-(summary|search)\]|You are writing a status summary for a card|You are the search engine of a software maintainer|You are searching a software maintainer|Reply in 1 concise Simplified Chinese sentence)/.test(t.trim()));
+    if (internal.length) throw new Error(`AI helper runs are listed: ${internal.slice(0, 3)}`);
+    if (ui.rows === 0) return 'no importable history';
+    // Typing the beginning of a native session ID ranks that session first
+    // (another session may mention the ID in its conversation).
+    const chip = await page.eval(`(() => { const c = document.querySelector('.import-row .id-chip:not(.is-ao)'); return c ? { id: c.dataset.nativeId, title: c.closest('.import-row').querySelector('.import-title').textContent } : null; })()`);
+    if (!chip) return `${ui.rows} sessions, none with a local native ID`;
+    await fill('.import-search input', chip.id.slice(0, 13));
+    await page.waitFor(`document.querySelectorAll('.import-row:not(.is-head)').length >= 1 && document.querySelector('.import-reason') && !document.querySelector('.import-count').textContent.includes('searching')`, 10000, 'the ID search');
+    const hit = await page.eval(`({ title: document.querySelector('.import-row:not(.is-head) .import-title').textContent, reason: document.querySelector('.import-reason') ? document.querySelector('.import-reason').textContent : '' })`);
+    if (hit.title !== chip.title || hit.reason !== `Matched ID: ${chip.id}`) throw new Error(`ID search found ${JSON.stringify(hit)}`);
+    await page.screenshot(`${out}/12-import-id-search.png`);
+    await page.click('.import-clear');
+    await page.waitFor(`document.querySelectorAll('.import-row:not(.is-head)').length === ${ui.rows}`);
+    return `${ui.rows} sessions, ${ui.chips} with a native ID`;
   });
-  await page.sleep(350);
   await page.screenshot(`${out}/07-import.png`);
   await page.click('.modal-head button[aria-label="Close"]');
 

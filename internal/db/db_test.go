@@ -602,7 +602,7 @@ func TestContentIndex(t *testing.T) {
 	if err := s.IndexContent(ctx, "volcano-2", msgs, 3, "stamp-1", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.IndexContent(ctx, "volcano-3", []ContentMessage{{MessageID: "x1", Sequence: 1, Role: "user", Text: "CompositePodGroup 设计讨论"}}, 1, "s", false); err != nil {
+	if err := s.IndexContent(ctx, "volcano-3", []ContentMessage{{MessageID: "x1", Sequence: 1, Role: "user", Text: "CompositePodGroup \u8bbe\u8ba1\u8ba8\u8bba"}}, 1, "s", false); err != nil {
 		t.Fatal(err)
 	}
 	if seq, stamp, _ := s.ContentState(ctx, "volcano-2"); seq != 3 || stamp != "stamp-1" {
@@ -622,7 +622,7 @@ func TestContentIndex(t *testing.T) {
 		t.Fatalf("hits across sessions = %+v", hits)
 	}
 	// Text without word boundaries is found by substring too.
-	if hits, _ := s.ContentHits(ctx, "设计"); len(hits) != 1 || hits[0].SessionID != "volcano-3" {
+	if hits, _ := s.ContentHits(ctx, "\u8bbe\u8ba1"); len(hits) != 1 || hits[0].SessionID != "volcano-3" {
 		t.Fatalf("CJK hits = %+v", hits)
 	}
 	// LIKE wildcards in the term are plain characters.
@@ -682,5 +682,22 @@ func TestContentIndex(t *testing.T) {
 	}
 	if hits, _ := s.ContentHits(ctx, "aaaa"); len(hits) != 1 || len(hits[0].Text) != MaxIndexedRunes {
 		t.Fatalf("long message hit = %d sessions", len(hits))
+	}
+
+	// Deleting a session drops its messages and its index state only.
+	if err := s.DeleteContent(ctx, "volcano-2"); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := s.ContentHits(ctx, "fresh start"); len(hits) != 0 {
+		t.Fatalf("deleted content is still found: %+v", hits)
+	}
+	if seq, stamp, _ := s.ContentState(ctx, "volcano-2"); seq != 0 || stamp != "" {
+		t.Fatalf("state after delete = %d %q", seq, stamp)
+	}
+	if sessions, _, _ := s.ContentStats(ctx); sessions != 2 {
+		t.Fatalf("%d sessions left after deleting one of three", sessions)
+	}
+	if err := s.DeleteContent(ctx, "never-indexed"); err != nil {
+		t.Fatalf("deleting an unknown session: %v", err)
 	}
 }

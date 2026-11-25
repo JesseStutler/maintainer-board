@@ -380,3 +380,28 @@ func TestFetchReportsMyReview(t *testing.T) {
 		t.Errorf("issue: MyReview = %+v, LastOtherActivityAt = %q", got.MyReview, got.LastOtherActivityAt)
 	}
 }
+
+func TestDescription(t *testing.T) {
+	f := &fakeGH{responses: map[string]string{
+		"api repos/volcano-sh/volcano/issues/6247": `{"number": 6247, "pull_request": {"url": "x"}, "body": "\n## What this PR does\n\nRemoves the scalar CSI counting.\n"}`,
+		"api repos/volcano-sh/volcano/issues/6100": `{"number": 6100, "body": null}`,
+	}, errs: map[string]error{"api repos/volcano-sh/volcano/issues/9999": fmt.Errorf("%w: HTTP 404", ErrNotFound)}}
+	c := newFakeClient(f)
+	// The issues endpoint serves pull requests and issues alike.
+	body, err := c.Description(context.Background(), "volcano-sh/volcano", 6247)
+	if err != nil || body != "## What this PR does\n\nRemoves the scalar CSI counting." {
+		t.Fatalf("Description = %q, %v", body, err)
+	}
+	if body, err := c.Description(context.Background(), "volcano-sh/volcano", 6100); err != nil || body != "" {
+		t.Fatalf("an item without a body = %q, %v", body, err)
+	}
+	if _, err := c.Description(context.Background(), "volcano-sh/volcano", 9999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown item: %v", err)
+	}
+	if _, err := c.Description(context.Background(), "not a repo", 1); !errors.Is(err, ErrBadRef) {
+		t.Fatalf("bad reference: %v", err)
+	}
+	if f.called("api") != 3 {
+		t.Fatalf("gh calls = %v", f.calls)
+	}
+}

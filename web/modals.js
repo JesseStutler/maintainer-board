@@ -1,9 +1,9 @@
 // Application dialogs: new task, column management and history import.
 
-import { h, relTime, plural, debounce } from './util.js';
-import { icon } from './icons.js';
-import { api } from './api.js';
-import { openModal, confirmDialog, toast, toastError, withBusy, segmented, select } from './ui.js';
+import { h, relTime, plural, debounce, copyText } from './util.js';
+import { icon, brandIcon } from './icons.js';
+import { api, importHistory } from './api.js';
+import { openModal, confirmDialog, toast, toastError, withBusy, segmented, select, spinner, statusStrip } from './ui.js';
 import { state, subscribe, emit, CATEGORIES, ROLES, COLOR_PRESETS, columns, cards, columnByRole, harnessLabel } from './state.js';
 import { createModelPicker } from './models.js';
 
@@ -312,10 +312,53 @@ export function openColumns({ onChanged } = {}) {
 
 // Import history
 
-export function openImport({ onImported } = {}) {
-  const view = { candidates: null, error: null, search: '', harness: '', scope: '', hideImported: true, selected: new Set() };
+const IMPORT_ROW_LIMIT = 400;
 
-  const search = h('input', { type: 'search', placeholder: 'Search session titles', spellcheck: 'false', 'aria-label': 'Search sessions', 'data-autofocus': true });
+const matchCount = (n) => `${n} ${n === 1 ? 'match' : 'matches'}`;
+
+/**
+ * The history import dialog. AO lists the Copilot and Codex sessions found
+ * on this machine; the board adds their native IDs and what was said in
+ * them, so a session can be found by an ID prefix, by words of a past
+ * prompt, or by describing it to AI Search.
+ */
+export function openImport({ onImported, onOpenCard } = {}) {
+  const view = {
+    candidates: null,
+    error: null,
+    query: '',
+    harness: '',
+    scope: '',
+    hideImported: true,
+    selected: new Set(),
+    // Server-side keyword search of the current query: { query, matches }.
+    search: null,
+    searching: false,
+    // AI search: status is idle, running, done or error.
+    ai: { status: 'idle', query: '', provider: '', error: '', matches: [], since: 0 },
+  };
+  let searchSeq = 0;
+  let importing = false;
+
+  const search = h('input', {
+    type: 'search',
+    placeholder: 'Search by session ID, title, topic, or past prompt...',
+    spellcheck: 'false',
+    autocomplete: 'off',
+    'aria-label': 'Search import history',
+    'data-autofocus': true,
+  });
+  const clearSearch = h('button', { class: 'btn btn-ghost btn-icon btn-sm import-clear', type: 'button', title: 'Clear the search', 'aria-label': 'Clear the search', hidden: true }, icon('x', 14));
+  const aiButton = h(
+    'button',
+    {
+      class: 'btn btn-ai import-ai',
+      type: 'button',
+      title: 'AI Search: describe the session in your own words and let the local AI find it by meaning (Ctrl+Enter)',
+    },
+    icon('sparkles', 14),
+    h('span', null, 'AI Search'),
+  );
   const harness = segmented(
     [
       ['', 'All'],
@@ -328,6 +371,8 @@ export function openImport({ onImported } = {}) {
       render();
     },
   );
+  harness.classList.add('import-harness');
+  harness.setAttribute('aria-label', 'Agent filter');
   const scope = h('select', { class: 'select', title: 'Filter by project or folder', 'aria-label': 'Filter by project or folder' }, h('option', { value: '' }, 'All projects and folders'));
   scope.addEventListener('change', () => {
     view.scope = scope.value;
@@ -336,53 +381,210 @@ export function openImport({ onImported } = {}) {
   const hideImported = h('button', { class: 'toggle', type: 'button', 'aria-pressed': 'true' }, 'Hide Imported');
   hideImported.addEventListener('click', () => {
     view.hideImported = !view.hideImported;
-    hideImported.setAttribute('aria-pressed', String(view.hideImported));
     render();
   });
-  search.addEventListener(
-    'input',
-    debounce(() => {
-      view.search = search.value.trim().toLowerCase();
-      render();
-    }, 120),
-  );
 
+  const banner = h('div', { class: 'import-banner', hidden: true });
   const listEl = h('div', { class: 'import-list' });
-  const countEl = h('span', { class: 'hint' });
+  const countEl = h('span', { class: 'hint import-count' });
   const selectAll = h('button', { class: 'btn btn-sm', type: 'button' }, 'Select All Shown');
   const clearSel = h('button', { class: 'btn btn-sm', type: 'button' }, 'Clear');
-  const importBtn = h('button', { class: 'btn btn-primary', type: 'button', disabled: true }, icon('history', 13), h('span', null, 'Import'));
+  const importLabel = h('span', null, 'Import');
+  const importBtn = h('button', { class: 'btn btn-primary import-selected', type: 'button', disabled: true }, icon('history', 13), importLabel);
 
   const scopeOf = (c) => (c.projectId ? `project:${c.projectId}` : c.folder ? `folder:${c.folder}` : 'none');
   const scopeLabel = (c) => c.projectId || c.folder || 'No project';
+  const byId = () => new Map((view.candidates || []).map((c) => [c.id, c]));
 
-  const filtered = () =>
-    (view.candidates || []).filter((c) => {
-      if (view.hideImported && c.sessionId) return false;
-      if (view.harness && c.harness !== view.harness) return false;
-      if (view.scope && scopeOf(c) !== view.scope) return false;
-      if (view.search && !`${c.title} ${c.projectId || ''} ${c.folder || ''} ${c.sessionId || ''}`.toLowerCase().includes(view.search)) return false;
-      return true;
+  /** A quick match in the browser, shown until the server search answers. */
+  const localMatch = (c, terms) => {
+    const hay = `${c.title} ${c.projectId || ''} ${c.folder || ''} ${c.sessionId || ''} ${c.nativeId || ''} ${c.id} ${c.branch || ''} ${c.summary || ''} ${c.preview || ''}`.toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  };
+
+  /**
+   * The rows to show, in order: the AI matches, the ranked search matches,
+   * or the whole history filtered by the toolbar. Each row is
+   * { candidate, reason, kind } with kind '', 'match' or 'ai'.
+   */
+  function rows() {
+    const current = byId();
+    // Search results carry their own copy of a candidate; the list is the
+    // fresher one after an import.
+    const fresh = (c) => current.get(c.id) || c;
+    const harnessOk = (c) => !view.harness || c.harness === view.harness;
+    if (view.ai.status === 'done') {
+      return view.ai.matches.map((m) => ({ candidate: fresh(m.candidate), reason: m.reason, kind: 'ai' })).filter((r) => harnessOk(r.candidate));
+    }
+    if (view.query) {
+      if (view.search && view.search.query === view.query) {
+        return view.search.matches
+          .map((m) => ({ candidate: fresh(m.candidate), reason: m.reason, kind: 'match' }))
+          .filter((r) => harnessOk(r.candidate) && (!view.scope || scopeOf(r.candidate) === view.scope));
+      }
+      const terms = view.query.toLowerCase().split(/\s+/).filter(Boolean);
+      return (view.candidates || [])
+        .filter((c) => harnessOk(c) && (!view.scope || scopeOf(c) === view.scope) && localMatch(c, terms))
+        .map((c) => ({ candidate: c, reason: '', kind: '' }));
+    }
+    return (view.candidates || [])
+      .filter((c) => !(view.hideImported && c.sessionId) && harnessOk(c) && (!view.scope || scopeOf(c) === view.scope))
+      .map((c) => ({ candidate: c, reason: '', kind: '' }));
+  }
+
+  function renderBanner() {
+    const ai = view.ai;
+    banner.hidden = ai.status === 'idle';
+    banner.className = `import-banner is-${ai.status}`;
+    const reset = (label) =>
+      h(
+        'button',
+        {
+          class: 'btn-link',
+          type: 'button',
+          dataset: { action: 'reset-ai' },
+          onClick: () => {
+            resetAI();
+            render();
+            runSearch();
+          },
+        },
+        label,
+      );
+    const quoted = h('span', { class: 'query' }, `"${ai.query}"`);
+    if (ai.status === 'running') {
+      // Built once per search, so the elapsed counter keeps running.
+      if (banner.dataset.since !== String(ai.since)) {
+        banner.dataset.since = String(ai.since);
+        const strip = statusStrip('Searching history with AI...', { since: ai.since, detail: `reading your sessions for "${ai.query}"`, actions: [reset('Cancel')] });
+        strip.classList.add('is-ai');
+        banner.replaceChildren(strip);
+      }
+      return;
+    }
+    delete banner.dataset.since;
+    if (ai.status === 'error') {
+      banner.replaceChildren(icon('x-circle', 15), h('span', { class: 'banner-text' }, h('strong', null, 'AI Search failed: '), ai.error), h('span', { class: 'spacer' }), reset('Dismiss'));
+    } else if (ai.status === 'done') {
+      const n = ai.matches.length;
+      banner.replaceChildren(
+        icon('sparkles', 15),
+        h('span', { class: 'banner-text' }, h('strong', null, 'AI Search: '), n === 0 ? 'no session matches ' : `${matchCount(n)} for `, quoted),
+        h('span', { class: 'hint' }, ai.provider ? `answered by ${ai.provider === 'copilot' || ai.provider === 'codex' ? harnessLabel(ai.provider) : ai.provider}` : ''),
+        h('span', { class: 'spacer' }),
+        reset('Reset'),
+      );
+    } else {
+      banner.replaceChildren();
+    }
+  }
+
+  function idChips(c) {
+    const chips = [];
+    if (c.nativeId) {
+      const chip = h(
+        'button',
+        { class: 'id-chip mono', type: 'button', title: `${harnessLabel(c.harness)} session ${c.nativeId}. Click to copy.`, 'aria-label': `Copy session ID ${c.nativeId}`, dataset: { nativeId: c.nativeId } },
+        c.nativeId.slice(0, 8),
+      );
+      chip.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        toast((await copyText(c.nativeId)) ? `Session ID ${c.nativeId} copied.` : 'Copying is not available in this browser.', 'info');
+      });
+      chips.push(chip);
+    }
+    if (c.sessionId) chips.push(h('span', { class: 'id-chip is-ao mono', title: `Imported into Agent Orchestrator as ${c.sessionId}` }, c.sessionId));
+    return chips;
+  }
+
+  function row({ candidate: c, reason, kind }) {
+    const imported = Boolean(c.sessionId);
+    const box = h('input', { type: 'checkbox', checked: view.selected.has(c.id), disabled: imported, 'aria-label': `Select ${c.title}` });
+    const toggle = () => {
+      if (imported) return;
+      if (view.selected.has(c.id)) view.selected.delete(c.id);
+      else view.selected.add(c.id);
+      render();
+    };
+    box.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle();
     });
+    // Second line: why the session matched, or what it was about.
+    let sub = null;
+    if (kind === 'ai') {
+      sub = h('span', { class: 'import-reason is-ai', title: reason }, icon('sparkles', 12), h('span', null, `AI match: ${reason}`));
+    } else if (kind === 'match' && reason) {
+      sub = h('span', { class: 'import-reason', title: reason }, icon('search', 12), h('span', null, reason));
+    } else if (c.summary || c.preview) {
+      sub = h('span', { class: 'import-preview', title: c.summary || c.preview }, c.summary || c.preview);
+    }
+    let action;
+    if (!imported) {
+      action = h('button', { class: 'btn btn-sm import-one', type: 'button', title: 'Import this session into AO and give it a card' }, 'Import');
+      action.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runImport([c.id], action, true);
+      });
+    } else if (c.cardId && onOpenCard) {
+      action = h('button', { class: 'btn btn-sm btn-ghost import-open', type: 'button', title: `Open the card of ${c.sessionId}` }, 'Open Card');
+      action.addEventListener('click', (e) => {
+        e.stopPropagation();
+        modal.close();
+        onOpenCard(c.cardId);
+      });
+    } else {
+      action = h('span', { class: 'import-done' }, 'Imported');
+    }
+    return h(
+      'div',
+      { class: ['import-row', imported && 'is-imported', kind && `is-${kind}`], onClick: toggle, dataset: { id: c.id } },
+      box,
+      h('span', { class: 'import-agent', title: harnessLabel(c.harness) }, brandIcon(c.harness, 15), h('span', null, harnessLabel(c.harness))),
+      h('span', { class: 'import-main' }, h('span', { class: 'import-title', title: c.title }, c.title || '(untitled session)'), sub),
+      h('span', { class: 'import-ids' }, idChips(c)),
+      h('span', { class: 'import-scope mono', title: c.branch ? `${scopeLabel(c)} (branch ${c.branch})` : scopeLabel(c) }, scopeLabel(c)),
+      h('span', { class: 'import-num mono' }, String(c.messageCount)),
+      h('span', { class: 'import-when', title: new Date(c.lastActivity).toLocaleString() }, relTime(c.lastActivity)),
+      h('span', { class: 'import-action' }, action),
+    );
+  }
 
   function render() {
     const selectedCount = view.selected.size;
-    importBtn.disabled = selectedCount === 0;
-    importBtn.lastChild.textContent = selectedCount > 0 ? `Import ${plural(selectedCount, 'Session')}` : 'Import';
+    if (!importing) {
+      importBtn.disabled = selectedCount === 0;
+      importLabel.textContent = selectedCount > 0 ? `Import ${plural(selectedCount, 'Session')}` : 'Import';
+    }
+    clearSearch.hidden = !search.value;
+    const searching = Boolean(view.query) || view.ai.status === 'done';
+    hideImported.setAttribute('aria-pressed', String(view.hideImported && !searching));
+    hideImported.disabled = searching;
+    hideImported.title = searching ? 'Search results include sessions that are already imported' : 'Hide sessions that are already imported into AO';
+    scope.disabled = view.ai.status === 'done';
+    renderBanner();
+    listEl.classList.toggle('is-stale', view.ai.status === 'running');
     if (view.error) {
       listEl.replaceChildren(h('div', { class: 'import-state' }, view.error));
       countEl.textContent = '';
       return;
     }
     if (view.candidates === null) {
-      listEl.replaceChildren(h('div', { class: 'import-state' }, 'Scanning local Copilot and Codex history through AO'));
+      listEl.replaceChildren(h('div', { class: 'import-state' }, spinner(15), h('span', null, 'Scanning local Copilot and Codex history through AO...')));
       countEl.textContent = '';
       return;
     }
-    const rows = filtered();
-    countEl.textContent = `${rows.length} of ${plural(view.candidates.length, 'session')} shown, ${selectedCount} selected`;
-    if (rows.length === 0) {
-      listEl.replaceChildren(h('div', { class: 'import-state' }, view.candidates.length === 0 ? 'AO found no historical sessions.' : 'No sessions match the filters.'));
+    const list = rows();
+    const total = view.candidates.length;
+    if (view.ai.status === 'done') countEl.textContent = `${matchCount(list.length)} from AI Search, ${selectedCount} selected`;
+    else if (view.query) countEl.textContent = `${list.length} of ${plural(total, 'session')} match${view.searching ? ' (searching...)' : ''}, ${selectedCount} selected`;
+    else countEl.textContent = `${list.length} of ${plural(total, 'session')} shown, ${selectedCount} selected`;
+    if (list.length === 0) {
+      let text = 'No sessions match the filters.';
+      if (total === 0) text = 'AO found no historical sessions.';
+      else if (view.ai.status === 'done') text = 'The AI found no session for this description. Try other words, or Reset to browse the list.';
+      else if (view.query) text = view.searching ? 'Searching...' : 'No session matches. Press AI Search for fuzzy semantic lookup.';
+      listEl.replaceChildren(h('div', { class: 'import-state' }, text));
       return;
     }
     const head = h(
@@ -390,42 +592,106 @@ export function openImport({ onImported } = {}) {
       { class: 'import-row is-head' },
       h('span'),
       h('span', null, 'Agent'),
-      h('span', null, 'Title'),
+      h('span', null, 'Session'),
+      h('span', null, 'ID'),
       h('span', null, 'Project / folder'),
       h('span', { class: 'import-num' }, 'Msgs'),
       h('span', { class: 'import-when' }, 'Last active'),
+      h('span'),
     );
-    const limit = 400;
-    const nodes = rows.slice(0, limit).map((c) => {
-      const imported = Boolean(c.sessionId);
-      const box = h('input', { type: 'checkbox', checked: view.selected.has(c.id), disabled: imported, 'aria-label': `Select ${c.title}` });
-      const toggle = () => {
-        if (imported) return;
-        if (view.selected.has(c.id)) view.selected.delete(c.id);
-        else view.selected.add(c.id);
-        render();
-      };
-      box.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggle();
-      });
-      return h(
-        'div',
-        { class: ['import-row', imported && 'is-imported'], onClick: toggle, title: c.title },
-        box,
-        h('span', { class: 'badge badge-harness' }, harnessLabel(c.harness)),
-        h('span', { class: 'import-title' }, c.title || '(untitled session)'),
-        h('span', { class: 'import-scope mono', title: scopeLabel(c) }, imported ? `Imported as ${c.sessionId}` : scopeLabel(c)),
-        h('span', { class: 'import-num mono' }, String(c.messageCount)),
-        h('span', { class: 'import-when', title: new Date(c.lastActivity).toLocaleString() }, relTime(c.lastActivity)),
-      );
-    });
-    if (rows.length > limit) nodes.push(h('div', { class: 'import-state' }, `Showing the first ${limit} sessions. Narrow the search to see the rest.`));
+    const nodes = list.slice(0, IMPORT_ROW_LIMIT).map(row);
+    if (list.length > IMPORT_ROW_LIMIT) nodes.push(h('div', { class: 'import-state' }, `Showing the first ${IMPORT_ROW_LIMIT} sessions. Narrow the search to see the rest.`));
     listEl.replaceChildren(head, ...nodes);
   }
 
+  function resetAI() {
+    view.ai = { status: 'idle', query: '', provider: '', error: '', matches: [], since: 0 };
+  }
+
+  /** Asks the server for the ranked matches of the current query. */
+  async function runSearch() {
+    const query = view.query;
+    searchSeq += 1;
+    const seq = searchSeq;
+    if (!query) {
+      view.search = null;
+      view.searching = false;
+      render();
+      return;
+    }
+    view.searching = true;
+    render();
+    try {
+      const res = await importHistory.search(query);
+      if (seq !== searchSeq) return;
+      view.search = { query, matches: res.matches };
+    } catch (err) {
+      if (seq !== searchSeq) return;
+      // The quick match in the browser stays on screen.
+      view.search = null;
+    }
+    view.searching = false;
+    render();
+  }
+  const scheduleSearch = debounce(runSearch, 180);
+
+  async function runAISearch() {
+    const query = search.value.trim();
+    if (!query) {
+      search.focus();
+      toast('Describe the session you are looking for, then start AI Search.', 'info');
+      return;
+    }
+    if (view.ai.status === 'running') return;
+    const since = Date.now();
+    view.ai = { status: 'running', query, provider: '', error: '', matches: [], since };
+    render();
+    await withBusy(
+      aiButton,
+      async () => {
+        const res = await importHistory.aiSearch(query);
+        // A search that was reset while it ran is not shown.
+        if (view.ai.status !== 'running' || view.ai.since !== since) return;
+        view.ai = { status: 'done', query: res.query, provider: res.provider, error: '', matches: res.matches, since };
+      },
+      (err) => {
+        if (view.ai.status === 'running' && view.ai.since === since) view.ai = { status: 'error', query, provider: '', error: err.message, matches: [], since };
+        return true;
+      },
+      'Searching with AI...',
+    );
+    render();
+  }
+
+  search.addEventListener('input', () => {
+    // Typing a new query leaves the AI result behind.
+    if (view.ai.status !== 'idle') resetAI();
+    view.query = search.value.trim();
+    // Until the server answers, the quick match in the browser is shown.
+    view.searching = Boolean(view.query);
+    render();
+    scheduleSearch();
+  });
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) runAISearch();
+      else runSearch();
+    } else if (e.key === 'Escape' && search.value) {
+      e.stopPropagation();
+      search.value = '';
+      search.dispatchEvent(new Event('input'));
+    }
+  });
+  clearSearch.addEventListener('click', () => {
+    search.value = '';
+    search.dispatchEvent(new Event('input'));
+    search.focus();
+  });
+  aiButton.addEventListener('click', runAISearch);
+
   selectAll.addEventListener('click', () => {
-    for (const c of filtered()) if (!c.sessionId) view.selected.add(c.id);
+    for (const r of rows()) if (!r.candidate.sessionId) view.selected.add(r.candidate.id);
     render();
   });
   clearSel.addEventListener('click', () => {
@@ -434,61 +700,85 @@ export function openImport({ onImported } = {}) {
   });
 
   async function load() {
-    view.candidates = null;
     view.error = null;
     render();
     try {
-      const res = await api.get('/api/import/candidates');
+      const res = await importHistory.list();
       view.candidates = res.candidates.slice().sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)));
       const scopes = new Map();
       for (const c of view.candidates) scopes.set(scopeOf(c), c.projectId ? `Project: ${c.projectId}` : c.folder ? `Folder: ${c.folder}` : 'No project');
       scope.replaceChildren(h('option', { value: '' }, 'All projects and folders'), ...Array.from(scopes, ([value, label]) => h('option', { value }, label)));
-      scope.value = view.scope;
+      scope.value = scopes.has(view.scope) ? view.scope : '';
+      view.scope = scope.value;
       for (const id of Array.from(view.selected)) {
         const match = view.candidates.find((c) => c.id === id);
         if (!match || match.sessionId) view.selected.delete(id);
       }
     } catch (err) {
+      view.candidates = view.candidates || null;
       view.error = err.message;
     }
     render();
   }
 
+  /**
+   * Imports the sessions with these candidate IDs. A single session that
+   * was imported from its row opens its new card right away.
+   */
+  function runImport(ids, button, single) {
+    if (ids.length === 0 || importing) return;
+    importing = true;
+    withBusy(
+      button,
+      async () => {
+        const res = await api.post('/api/import', { ids });
+        const failures = res.results.filter((r) => r.status === 'failed');
+        if (res.imported > 0) toast(`Imported ${plural(res.imported, 'session')}. ${res.imported === 1 ? 'Its card is' : 'Their cards are'} in the intake column.`, 'success');
+        for (const f of failures.slice(0, 3)) toast(`Import failed: ${f.error || 'unknown error'}`, 'error');
+        if (onImported) onImported(res);
+        if (failures.length === 0) {
+          modal.close();
+          const created = res.results.find((r) => r.cardId);
+          if (single && created && onOpenCard) onOpenCard(created.cardId);
+        } else {
+          view.selected = new Set(failures.map((f) => f.id));
+          await load();
+        }
+      },
+      null,
+      'Importing...',
+    ).finally(() => {
+      importing = false;
+      if (!modal.closed) render();
+    });
+  }
+
   const body = h(
     'div',
-    null,
+    { class: 'import-body' },
     h(
       'p',
       { class: 'modal-text' },
       'AO scans the Copilot and Codex history on this machine. Imported sessions become AO sessions with their full conversation, and each one gets a card in the intake column. Agents stay stopped until you resume them.',
     ),
-    h('div', { class: 'import-toolbar' }, h('label', { class: 'search' }, icon('search', 14), search), harness, scope, hideImported),
+    h('div', { class: 'import-search' }, h('label', { class: 'search' }, icon('search', 15), search, clearSearch), aiButton),
+    h(
+      'p',
+      { class: 'hint import-hint' },
+      'Typing filters by session ID (native UUID or AO ID), title, folder, branch and what was said in the conversation. Not sure of the words? Press AI Search for fuzzy semantic lookup.',
+    ),
+    h('div', { class: 'import-toolbar' }, harness, scope, hideImported),
+    banner,
     listEl,
   );
   const modal = openModal({
     title: 'Import History',
-    size: 'wide',
+    size: 'xwide',
     body,
     foot: [countEl, h('span', { class: 'spacer' }), clearSel, selectAll, importBtn],
   });
 
-  importBtn.addEventListener('click', () => {
-    const ids = Array.from(view.selected);
-    if (ids.length === 0) return;
-    withBusy(importBtn, async () => {
-      const res = await api.post('/api/import', { ids });
-      const failures = res.results.filter((r) => r.status === 'failed');
-      if (res.imported > 0) toast(`Imported ${plural(res.imported, 'session')}. Their cards are in the intake column.`, 'success');
-      for (const f of failures.slice(0, 3)) toast(`Import failed: ${f.error || 'unknown error'}`, 'error');
-      if (onImported) onImported(res);
-      if (failures.length === 0) {
-        modal.close();
-      } else {
-        view.selected = new Set(failures.map((f) => f.id));
-        load();
-      }
-    });
-  });
+  importBtn.addEventListener('click', () => runImport(Array.from(view.selected), importBtn, false));
 
   load();
 }

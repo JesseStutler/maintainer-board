@@ -20,6 +20,7 @@ import (
 	"maintainer-board/internal/ao"
 	"maintainer-board/internal/db"
 	"maintainer-board/internal/github"
+	"maintainer-board/internal/history"
 	"maintainer-board/internal/server"
 	"maintainer-board/internal/summary"
 	"maintainer-board/web"
@@ -53,7 +54,11 @@ func run() error {
 		aoSyncInterval = flag.Duration("ao-sync-interval", 5*time.Second, "AO session sync interval")
 		ghPath         = flag.String("gh-path", "gh", "path of the gh CLI")
 		ghUser         = flag.String("gh-user", "", "your GitHub login, for author and review status (default: the account gh is logged in as)")
-		summaryModel   = flag.String("summary-model", summary.DefaultSummaryModel, "Copilot CLI model for Summarize with AI; empty uses the CLI default (copilot's default model and codex remain as fallbacks)")
+		summaryModel   = flag.String("summary-model", summary.DefaultSummaryModel, "Copilot CLI model for Summarize with AI and AI Search; empty uses the CLI default (copilot's default model and codex remain as fallbacks)")
+		summaryEffort  = flag.String("summary-effort", summary.DefaultSummaryEffort, "reasoning effort passed with --summary-model; empty passes none (a model that rejects the effort is retried without it)")
+		copilotPath    = flag.String("copilot-path", "copilot", "path of the copilot CLI used for Summarize with AI and AI Search")
+		codexPath      = flag.String("codex-path", "codex", "path of the codex CLI, the last fallback of the AI features")
+		historyHome    = flag.String("history-home", "", "home directory whose .copilot and .codex session stores enrich Import History (default: your home directory)")
 		ciIgnore       = flag.String("ci-ignore-contexts", "tide", "comma-separated status contexts and check names ignored in the CI rollup")
 		prowLabels     = flag.Bool("prow-approval-labels", true, "treat the lgtm + approved label pair as an approval")
 		allowedHosts   = flag.String("allowed-hosts", "", "comma-separated extra Host header values to accept besides loopback")
@@ -72,6 +77,12 @@ func run() error {
 	}
 	if m := strings.TrimSpace(*summaryModel); m != "" && !summary.ValidModel(m) {
 		return fmt.Errorf("invalid --summary-model %q: expected a model name such as %s", *summaryModel, summary.DefaultSummaryModel)
+	}
+	if e := strings.TrimSpace(*summaryEffort); e != "" && !summary.ValidEffort(e) {
+		return fmt.Errorf("invalid --summary-effort %q: expected an effort such as %s", *summaryEffort, summary.DefaultSummaryEffort)
+	}
+	if strings.TrimSpace(*copilotPath) == "" || strings.TrimSpace(*codexPath) == "" {
+		return errors.New("--copilot-path and --codex-path must not be empty")
 	}
 	if *syncInterval < 10*time.Second {
 		return errors.New("--sync-interval must be at least 10s")
@@ -108,8 +119,11 @@ func run() error {
 		cancel()
 	}
 
-	ai := summary.NewAI(filepath.Join(filepath.Dir(*dbPath), "summarizer"))
+	helperDir := filepath.Join(filepath.Dir(*dbPath), "summarizer")
+	ai := summary.NewAI(helperDir)
 	ai.SummaryModel = strings.TrimSpace(*summaryModel)
+	ai.SummaryEffort = strings.TrimSpace(*summaryEffort)
+	ai.CopilotPath, ai.CodexPath = strings.TrimSpace(*copilotPath), strings.TrimSpace(*codexPath)
 
 	srv := server.New(server.Config{
 		DefaultRepo:        *defaultRepo,
@@ -118,6 +132,8 @@ func run() error {
 		GitHubSyncInterval: *syncInterval,
 		AOSyncInterval:     *aoSyncInterval,
 		AllowedHosts:       splitList(*allowedHosts),
+		History:            history.New(*historyHome),
+		HelperDir:          helperDir,
 	}, store, ao.New(*aoURL), gh, ai, web.Files, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

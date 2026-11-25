@@ -7,7 +7,7 @@ import { icon, brandIcon } from './icons.js';
 import { api, cardPath, sessionPath } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { createModelPicker, fillModelSelect, fillEffortSelect, effectiveModel } from './models.js';
-import { toast, toastError, withBusy, confirmDialog, segmented, select } from './ui.js';
+import { toast, toastError, withBusy, confirmDialog, actionDialog, setButtonBusy, spinner, thinkingDots, statusStrip, elapsed, segmented, select } from './ui.js';
 import {
   state,
   emit,
@@ -82,6 +82,8 @@ export function isDrawerExpanded() {
 export function setDrawerExpanded(expanded) {
   if (!ctx || ctx.expanded === expanded) return;
   const atEnd = ctx.chat ? nearBottom() : false;
+  const anchor = ctx.chat && !atEnd ? chatAnchor() : null;
+  const focused = document.activeElement;
   ctx.expanded = expanded;
   ctx.el.classList.toggle('is-expanded', expanded);
   document.body.classList.toggle('drawer-expanded', expanded);
@@ -90,7 +92,28 @@ export function setDrawerExpanded(expanded) {
   delete ctx.sigs.sessionBar;
   updateDrawer();
   autoGrow(ctx.els.title);
+  // The conversation reflows to another width: keep the reader where they
+  // were, at the end or at the same message.
   if (atEnd) scrollChatToEnd(false);
+  else if (anchor) restoreChatAnchor(anchor);
+  if (focused && focused !== document.activeElement && ctx.el.contains(focused)) focused.focus({ preventScroll: true });
+}
+
+/** The first conversation item in view and how far it is from the top. */
+function chatAnchor() {
+  const scroller = ctx.els.chatScroll;
+  const top = scroller.getBoundingClientRect().top;
+  for (const el of scroller.children) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > top) return { el, offset: rect.top - top };
+  }
+  return null;
+}
+
+function restoreChatAnchor(anchor) {
+  const scroller = ctx.els.chatScroll;
+  if (!anchor.el.isConnected) return;
+  scroller.scrollTop += anchor.el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchor.offset;
 }
 
 export function toggleDrawerExpanded() {
@@ -205,8 +228,10 @@ function build(card) {
   els.controlsSection = h('section', { class: 'section section-controls', hidden: true }, h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, 'Controls')), els.controlsSlot);
 
   els.sessionChip = h('span', { class: 'drawer-session', hidden: true });
-  els.expand = h('button', { class: 'btn btn-sm btn-collapsible drawer-expand', type: 'button', onClick: toggleDrawerExpanded });
-  els.close = h('button', { class: 'btn btn-ghost btn-sm drawer-close', type: 'button', 'aria-label': 'Close', onClick: () => closeDrawer() });
+  // One button switches between the two layouts: "Expand" next to Close in
+  // the side drawer, "Collapse" leading the header of the workspace.
+  els.expand = h('button', { class: 'btn btn-sm drawer-expand btn-expand', type: 'button', onClick: toggleDrawerExpanded });
+  els.close = h('button', { class: 'btn btn-ghost btn-icon btn-sm drawer-close', type: 'button', 'aria-label': 'Close', onClick: () => closeDrawer() }, icon('x', 15));
   els.topSpacer = h('span', { class: 'spacer' });
 
   const top = h(
@@ -216,8 +241,8 @@ function build(card) {
     els.controls,
     els.topSpacer,
     els.openGitHub,
-    els.expand,
     h('button', { class: 'btn btn-ghost btn-icon btn-sm btn-danger', type: 'button', title: 'Delete card', 'aria-label': 'Delete card', onClick: deleteCard }, icon('trash', 15)),
+    els.expand,
     els.close,
   );
   els.top = top;
@@ -317,7 +342,7 @@ function build(card) {
     els.send = h('button', { class: 'btn btn-primary btn-sm', type: 'button', title: 'Send (Ctrl+Enter)', onClick: sendMessage }, icon('send', 13), h('span', null, 'Send'));
     els.stop = h(
       'button',
-      { class: 'btn btn-sm btn-danger', type: 'button', hidden: true, title: 'Interrupt the running turn', onClick: (e) => withBusy(e.currentTarget, interrupt) },
+      { class: 'btn btn-sm btn-danger', type: 'button', hidden: true, title: 'Interrupt the running turn', onClick: (e) => withBusy(e.currentTarget, interrupt, null, 'Stopping...') },
       icon('stop', 13),
       h('span', null, 'Stop'),
     );
@@ -356,6 +381,9 @@ function build(card) {
     expanded: false,
     editing: { summary: false, notes: false },
     sessionError: null,
+    // Running operations, each { since }: an AI summary, a session resume.
+    summarizing: null,
+    resuming: null,
     sending: false,
     timelineStamp: '',
     chat: null,
@@ -537,26 +565,60 @@ function failAndResync(err) {
   }
 }
 
+/**
+ * Asks how to delete the open card. A card with an AO session offers to
+ * delete the session from Agent Orchestrator as well, or to keep it there;
+ * the request runs while the dialog shows its progress.
+ */
 async function deleteCard() {
   const card = cardById(ctx.cardId);
   if (!card) return;
-  const message = h(
-    'div',
-    null,
-    h('p', { class: 'modal-text' }, 'Delete ', h('strong', null, card.title), '? Notes, summary and the timeline of this card are removed.'),
-    card.aoSessionId
-      ? h('p', { class: 'modal-text' }, 'The AO session ', h('strong', null, card.aoSessionId), ' keeps running in AO and will not get a new card automatically.')
-      : null,
-  );
-  if (!(await confirmDialog({ title: 'Delete card', message, confirmLabel: 'Delete Card', danger: true }))) return;
-  try {
-    await api.del(cardPath(card.id));
-    closeDrawer();
-    toast('Card deleted.', 'success');
-    onRefresh();
-  } catch (err) {
-    toastError(err);
+  const sessionId = card.aoSessionId;
+  const remove = async (withSession) => {
+    await api.del(cardPath(card.id, withSession ? '?deleteAoSession=true' : ''));
+  };
+  const intro = h('p', { class: 'modal-text' }, 'Delete ', h('strong', null, card.title), '? Notes, summary and the timeline of this card are removed.');
+  let message = intro;
+  let actions = [{ label: 'Delete Card', value: 'card', variant: 'danger', busyLabel: 'Deleting...', autofocus: true, run: () => remove(false) }];
+  // A session AO no longer reports is already gone; there is nothing to choose.
+  if (sessionId && !(card.sessionMissing && state.board.ao.connected)) {
+    const agent = card.session ? harnessLabel(card.session.harness) : 'agent';
+    const offline = !state.board.ao.connected;
+    message = h(
+      'div',
+      { class: 'delete-choice' },
+      intro,
+      h('p', { class: 'modal-text' }, 'This card is linked to the ', agent, ' session ', h('strong', { class: 'mono' }, sessionId), ' in Agent Orchestrator.'),
+      h(
+        'dl',
+        { class: 'choice-list' },
+        h('dt', null, 'Delete Card & AO Session'),
+        h('dd', null, 'Also terminates the session and permanently deletes it from Agent Orchestrator, together with its AO conversation history. Git branches and pull requests are kept.'),
+        h('dt', null, 'Delete Card Only'),
+        h('dd', null, 'Removes the card from this board. The session stays in Agent Orchestrator and does not get a new card automatically; you can link or import it again later.'),
+      ),
+    );
+    actions = [
+      { label: 'Delete Card Only', value: 'card', busyLabel: 'Deleting...', run: () => remove(false) },
+      {
+        label: 'Delete Card & AO Session',
+        value: 'both',
+        variant: 'danger',
+        busyLabel: 'Deleting...',
+        autofocus: !offline,
+        disabled: offline,
+        title: offline ? 'AO is offline, so the session cannot be deleted right now' : 'Delete from Maintainer Board and from Agent Orchestrator',
+        run: () => remove(true),
+      },
+    ];
+  } else if (sessionId) {
+    message = h('div', null, intro, h('p', { class: 'modal-text' }, 'Agent Orchestrator no longer reports its session ', h('strong', { class: 'mono' }, sessionId), ', so there is nothing to delete there.'));
   }
+  const choice = await actionDialog({ title: 'Delete card', message, actions, size: sessionId ? 'medium' : 'narrow' });
+  if (!choice) return;
+  if (ctx && ctx.cardId === card.id) closeDrawer();
+  toast(choice === 'both' ? `Card and AO session ${sessionId} deleted.` : sessionId ? `Card deleted. Session ${sessionId} stays in Agent Orchestrator.` : 'Card deleted.', 'success');
+  onRefresh();
 }
 
 function addTag() {
@@ -595,18 +657,21 @@ function renderTop(card) {
   }
 
   if (ctx.expanded) {
-    els.expand.title = 'Return to the side drawer next to the board (F or Esc)';
-    els.expand.replaceChildren(icon('panel-right', 14), h('span', { class: 'btn-label' }, 'Split Board'));
-    els.close.title = 'Close this card and go back to the board';
-    els.close.replaceChildren(icon('arrow-left', 14), h('span', null, 'Back to Board'));
+    // Leaving the workspace returns to the drawer with this card still
+    // open; only Close goes all the way back to the board.
+    els.expand.title = 'Collapse to the side drawer; this card stays open (F or Esc)';
+    els.expand.setAttribute('aria-label', 'Collapse to the side drawer');
+    els.expand.replaceChildren(icon('panel-right', 14), h('span', { class: 'btn-label' }, 'Collapse'));
+    els.close.title = 'Close this card and return to the board';
   } else {
-    els.expand.title = 'Expand to a full-width workspace (F)';
+    els.expand.title = 'Expand to full workspace (F)';
+    els.expand.setAttribute('aria-label', 'Expand to full workspace');
     els.expand.replaceChildren(icon('maximize', 14), h('span', { class: 'btn-label' }, 'Expand'));
     els.close.title = 'Close (Esc)';
-    els.close.replaceChildren(icon('x', 15));
   }
+  els.expand.classList.toggle('btn-expand', !ctx.expanded);
+  els.expand.classList.toggle('btn-collapse', ctx.expanded);
   els.expand.setAttribute('aria-pressed', String(ctx.expanded));
-  els.close.classList.toggle('btn-icon', !ctx.expanded);
 
   if (document.activeElement !== els.title && els.title.value !== card.title) {
     els.title.value = card.title;
@@ -678,9 +743,10 @@ function renderSummary(card) {
         {
           class: 'btn btn-sm btn-collapsible',
           type: 'button',
-          title: 'Summarize with AI: ask the local Copilot CLI (Codex as fallback) for a one or two sentence summary',
+          title: 'Summarize with AI: ask the local Copilot CLI (Codex as fallback) what this card is about, in one or two sentences',
           'aria-label': 'Summarize with AI',
-          onClick: (e) => withBusy(e.currentTarget, summarize),
+          dataset: { action: 'summarize' },
+          onClick: summarize,
         },
         icon('sparkles', 14),
         h('span', { class: 'btn-label' }, 'Summarize with AI'),
@@ -701,8 +767,17 @@ function renderSummary(card) {
       ),
     ],
   });
+  // A running AI summary: the button is busy, and the place where the
+  // summary will appear says so, with the time it has taken so far.
+  const progress = ctx.summarizing ? h('div', { class: 'summary-progress' }, statusStrip('Generating summary with AI...', { since: ctx.summarizing.since })) : null;
+  if (progress) {
+    progress.firstChild.classList.add('is-ai');
+    // A folded section has no buttons in its head.
+    const button = head.querySelector('[data-action="summarize"]');
+    if (button) setButtonBusy(button, 'Summarizing...');
+  }
   if (collapsed) {
-    els.summary.replaceChildren(head);
+    els.summary.replaceChildren(...[head, progress].filter(Boolean));
     return;
   }
   let body;
@@ -735,7 +810,8 @@ function renderSummary(card) {
       ),
     );
   }
-  els.summary.replaceChildren(head, body);
+  if (progress && !ctx.editing.summary) body.classList.add('is-updating');
+  els.summary.replaceChildren(...[head, progress, body].filter(Boolean));
 }
 
 function sourceTitle(source) {
@@ -745,12 +821,24 @@ function sourceTitle(source) {
 }
 
 async function summarize() {
-  const res = await api.post(cardPath(ctx.cardId, '/summarize'));
-  ctx.editing.summary = false;
-  applyCard(res.card);
-  // The engine is "copilot", "codex", or the model the Copilot CLI used.
-  const engine = res.engine === 'copilot' || res.engine === 'codex' ? harnessLabel(res.engine) : `${res.engine} (Copilot CLI)`;
-  toast(`Summary updated with ${engine}.`, 'success');
+  if (!ctx || ctx.summarizing) return;
+  const active = ctx;
+  active.summarizing = { since: Date.now() };
+  rerender('summary');
+  try {
+    const res = await api.post(cardPath(active.cardId, '/summarize'));
+    active.summarizing = null;
+    if (ctx === active) ctx.editing.summary = false;
+    applyCard(res.card);
+    // The engine is "copilot", "codex", or the model the Copilot CLI used.
+    const engine = res.engine === 'copilot' || res.engine === 'codex' ? harnessLabel(res.engine) : `${res.engine} (Copilot CLI)`;
+    toast(`Summary updated with ${engine}.`, 'success');
+  } catch (err) {
+    toastError(err);
+  } finally {
+    active.summarizing = null;
+    if (ctx === active) rerender('summary');
+  }
 }
 
 function renderNotes(card) {
@@ -823,7 +911,7 @@ function renderGitHub(card) {
         input.value = '';
         applyCard(updated);
         toast(`Linked ${ghRefLabel(updated)}.`, 'success');
-      });
+      }, null, 'Linking...');
     };
     button.addEventListener('click', submit);
     input.addEventListener('keydown', (e) => {
@@ -862,7 +950,7 @@ function renderGitHub(card) {
           // A failed sync may still have recorded an error on the card.
           onRefresh();
           return false;
-        }),
+        }, 'Syncing...'),
     },
     icon('refresh', 14),
     h('span', { class: 'btn-label' }, 'Sync Now'),
@@ -1169,7 +1257,7 @@ function renderAgentStart(card) {
           });
           toast(`Started ${harnessLabel(harness.value)} session ${updated.aoSessionId}.`, 'success');
           applyCard(updated);
-        }),
+        }, null, 'Starting session...'),
     },
     icon('play', 13),
     h('span', null, 'Start Agent Session'),
@@ -1287,10 +1375,41 @@ function renderSessionBar(card) {
   );
   if (session && !session.isTerminated) {
     nodes.push(
-      h('button', { class: 'btn btn-ghost btn-icon btn-sm btn-danger', type: 'button', title: 'Terminate this AO session', 'aria-label': 'Terminate session', onClick: terminateSession }, icon('power', 14)),
+      h(
+        'button',
+        { class: 'btn btn-ghost btn-icon btn-sm btn-danger', type: 'button', title: 'Terminate: stop the agent process; the session and its history stay in Agent Orchestrator', 'aria-label': 'Terminate session', onClick: terminateSession },
+        icon('power', 14),
+      ),
     );
   }
-  nodes.push(h('button', { class: 'btn btn-ghost btn-icon btn-sm', type: 'button', title: 'Unlink this session from the card', 'aria-label': 'Unlink session', onClick: unlinkSession }, icon('unlink', 14)));
+  // Two different things, named apart: Unlink only detaches, Delete removes
+  // the session from Agent Orchestrator.
+  nodes.push(
+    h(
+      'button',
+      {
+        class: 'btn btn-ghost btn-sm btn-collapsible session-unlink',
+        type: 'button',
+        title: 'Unlink from card: detaches the session from this card only; keeps the session in Agent Orchestrator',
+        'aria-label': 'Unlink from card',
+        onClick: unlinkSession,
+      },
+      icon('unlink', 14),
+      h('span', { class: 'btn-label' }, 'Unlink'),
+    ),
+    h(
+      'button',
+      {
+        class: 'btn btn-ghost btn-sm btn-danger btn-collapsible session-delete',
+        type: 'button',
+        title: 'Delete AO Session: permanently removes the session from Agent Orchestrator and detaches it from this card; the card stays',
+        'aria-label': 'Delete AO Session',
+        onClick: deleteSession,
+      },
+      icon('trash', 14),
+      h('span', { class: 'btn-label' }, 'Delete Session'),
+    ),
+  );
   els.sessionBar.replaceChildren(...nodes);
 }
 
@@ -1307,7 +1426,18 @@ function renderSessionAlerts(card) {
   const { els } = ctx;
   const session = card.session;
   const nodes = [];
-  const unlink = h('button', { class: 'btn btn-sm', type: 'button', onClick: unlinkSession }, icon('unlink', 13), h('span', null, 'Unlink Session'));
+  const unlink = h(
+    'button',
+    { class: 'btn btn-sm', type: 'button', title: 'Detaches the session from this card only; keeps the session in Agent Orchestrator', onClick: unlinkSession },
+    icon('unlink', 13),
+    h('span', null, 'Unlink from Card'),
+  );
+  const remove = h(
+    'button',
+    { class: 'btn btn-sm btn-danger', type: 'button', title: 'Permanently removes the session from Agent Orchestrator and detaches it from this card', onClick: deleteSession },
+    icon('trash', 13),
+    h('span', null, 'Delete AO Session'),
+  );
 
   if (!session) {
     const offline = !state.board.ao.connected;
@@ -1321,12 +1451,24 @@ function renderSessionAlerts(card) {
       ),
     );
   } else if (session.isTerminated) {
-    nodes.push(alertBox('info', 'info', 'This session was terminated', 'The history stays readable. Unlink it to start a new agent session from this card.', [unlink]));
-  } else if (session.needsResume) {
-    const resume = h('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: (e) => withBusy(e.currentTarget, resumeSession, onResumeError) }, icon('play', 13), h('span', null, 'Resume Session'));
     nodes.push(
-      alertBox('info', 'info', 'The agent is not running', 'This imported session shows its history, but the agent has to be resumed before it can take new messages.', [resume]),
+      alertBox('info', 'info', 'This session was terminated', 'The history stays readable. Unlink it to start a new agent session from this card, or delete it from Agent Orchestrator as well.', [unlink, remove]),
     );
+  } else if (session.needsResume) {
+    const resume = h('button', { class: 'btn btn-sm btn-primary', type: 'button', dataset: { action: 'resume' }, onClick: resumeSession }, icon('play', 13), h('span', null, 'Resume Session'));
+    if (ctx.resuming) {
+      // AO starts the agent and replays the session; that takes a while.
+      setButtonBusy(resume, 'Resuming session...');
+      const box = alertBox('info', 'info', 'Waking up agent session...', 'AO is starting the agent and restoring the conversation. This can take a little while.', [resume, elapsed(ctx.resuming.since, 0)]);
+      box.classList.add('is-working');
+      box.replaceChild(spinner(15), box.firstChild);
+      box.appendChild(h('span', { class: 'progress-strip', 'aria-hidden': 'true' }));
+      nodes.push(box);
+    } else {
+      nodes.push(
+        alertBox('info', 'info', 'The agent is not running', 'This imported session shows its history, but the agent has to be resumed before it can take new messages.', [resume]),
+      );
+    }
   } else if (session.activity && (session.activity.state === 'waiting_input' || session.activity.state === 'blocked')) {
     nodes.push(
       alertBox('warning', 'alert', 'The agent is waiting for input', 'Answer a question by sending a message below. Tool approval prompts have to be answered in AO desktop.'),
@@ -1362,42 +1504,119 @@ function onResumeError(err) {
 }
 
 async function resumeSession() {
-  ctx.sessionError = null;
-  await api.post(sessionPath(ctx.sessionId, '/resume'));
-  toast(`Session ${ctx.sessionId} resumed.`, 'success');
-  onRefresh();
-  pollChat();
+  if (!ctx || ctx.resuming) return;
+  const active = ctx;
+  active.sessionError = null;
+  active.resuming = { since: Date.now() };
+  rerender('sessionAlerts');
+  renderChat(true);
+  try {
+    await api.post(sessionPath(active.sessionId, '/resume'));
+    toast(`Session ${active.sessionId} resumed.`, 'success');
+    onRefresh();
+    if (ctx === active) pollChat();
+  } catch (err) {
+    if (ctx === active) onResumeError(err);
+    else toastError(err);
+  } finally {
+    active.resuming = null;
+    if (ctx === active) {
+      rerender('sessionAlerts');
+      renderChat(true);
+    }
+  }
 }
 
 async function terminateSession() {
-  const ok = await confirmDialog({
+  const sessionId = ctx.sessionId;
+  const done = await actionDialog({
     title: 'Terminate session',
-    message: `Terminate AO session ${ctx.sessionId}? The agent process is stopped; the conversation history stays readable.`,
-    confirmLabel: 'Terminate',
-    danger: true,
+    message: `Terminate AO session ${sessionId}? The agent process is stopped. The session and its conversation history stay in Agent Orchestrator and remain readable here.`,
+    actions: [{ label: 'Terminate', value: 'terminate', variant: 'danger', busyLabel: 'Terminating...', autofocus: true, run: () => api.post(sessionPath(sessionId, '/kill')) }],
   });
-  if (!ok || !ctx) return;
-  try {
-    await api.post(sessionPath(ctx.sessionId, '/kill'));
-    toast(`Session ${ctx.sessionId} terminated.`, 'success');
-    onRefresh();
-  } catch (err) {
-    toastError(err);
-  }
+  if (!done) return;
+  toast(`Session ${sessionId} terminated.`, 'success');
+  onRefresh();
 }
 
+/** Detaches the session from the card. The session itself is not touched. */
 async function unlinkSession() {
-  const ok = await confirmDialog({
-    title: 'Unlink session',
-    message: `Detach AO session ${ctx.sessionId} from this card? The session keeps running in AO and will not get a new card automatically.`,
-    confirmLabel: 'Unlink',
+  const sessionId = ctx.sessionId;
+  const cardId = ctx.cardId;
+  const message = h(
+    'div',
+    null,
+    h('p', { class: 'modal-text' }, 'Detach AO session ', h('strong', { class: 'mono' }, sessionId), ' from this card?'),
+    h(
+      'p',
+      { class: 'modal-text' },
+      'This only removes the link. The session keeps running in Agent Orchestrator with its full history, and it does not get a new card automatically; link or import it again whenever you want it back on the board.',
+    ),
+    h('p', { class: 'modal-text hint' }, 'To remove the session itself, use Delete AO Session instead.'),
+  );
+  let card = null;
+  const done = await actionDialog({
+    title: 'Unlink from card',
+    message,
+    actions: [
+      {
+        label: 'Unlink from Card',
+        value: 'unlink',
+        variant: 'primary',
+        busyLabel: 'Unlinking...',
+        autofocus: true,
+        run: async () => {
+          card = (await api.post(cardPath(cardId, '/unlink'))).card;
+        },
+      },
+    ],
   });
-  if (!ok || !ctx) return;
-  try {
-    await patchCard({ aoSessionId: '' });
-  } catch (err) {
-    toastError(err);
-  }
+  if (!done) return;
+  toast(`Session ${sessionId} unlinked. It stays in Agent Orchestrator.`, 'success');
+  applyCard(card);
+}
+
+/**
+ * Deletes the session from Agent Orchestrator for good and detaches it from
+ * the card. The card stays on the board.
+ */
+async function deleteSession() {
+  const sessionId = ctx.sessionId;
+  const cardId = ctx.cardId;
+  const current = cardById(cardId);
+  const running = current && current.session && !current.session.isTerminated && !current.session.needsResume;
+  const message = h(
+    'div',
+    null,
+    h('p', { class: 'modal-text' }, 'Permanently delete AO session ', h('strong', { class: 'mono' }, sessionId), ' from Agent Orchestrator?'),
+    h(
+      'p',
+      { class: 'modal-text' },
+      running ? 'The running agent is terminated first. ' : '',
+      'The session disappears from Agent Orchestrator and its desktop app, together with its AO conversation history. This cannot be undone. Git branches and pull requests are kept.',
+    ),
+    h('p', { class: 'modal-text hint' }, 'The card stays on the board with its notes, summary and GitHub link. To keep the session and only detach it, use Unlink instead.'),
+  );
+  let card = null;
+  const done = await actionDialog({
+    title: 'Delete AO session',
+    message,
+    actions: [
+      {
+        label: 'Delete AO Session',
+        value: 'delete',
+        variant: 'danger',
+        busyLabel: 'Deleting...',
+        run: async () => {
+          card = (await api.del(cardPath(cardId, '/session'))).card;
+        },
+      },
+    ],
+  });
+  if (!done) return;
+  toast(`AO session ${sessionId} deleted from Agent Orchestrator.`, 'success');
+  applyCard(card);
+  onRefresh();
 }
 
 /**
@@ -1508,6 +1727,10 @@ function startChat(sessionId) {
     timer: null,
     stopped: false,
     lastCount: 0,
+    // awaiting: a message was sent and the agent has not answered yet.
+    // busySince: when the current stretch of agent work began.
+    awaiting: null,
+    busySince: 0,
   };
   renderChat();
   pollChat();
@@ -1524,7 +1747,7 @@ function schedulePoll() {
   if (!chat || chat.stopped) return;
   clearTimeout(chat.timer);
   const card = cardById(ctx.cardId);
-  const fast = isSessionActive(card) || chat.streaming || chat.pending.length > 0;
+  const fast = isSessionActive(card) || chat.streaming || chat.pending.length > 0 || Boolean(chat.awaiting);
   let delay = fast ? POLL_ACTIVE_MS : POLL_IDLE_MS;
   if (document.hidden) delay = POLL_HIDDEN_MS;
   chat.timer = setTimeout(pollChat, delay);
@@ -1718,9 +1941,9 @@ function renderChat(keepScroll = false) {
 
   if (chat.loadedOnce && chat.error && items.length > 0) {
     desired.push(stateNode(chat, 'state:tail', `error:${chat.error.message}`, h('div', { class: 'activity is-failed' }, icon('x-circle', 12), h('span', { class: 'label' }, `Conversation refresh failed: ${chat.error.message}`))));
-  } else if (isSessionActive(card) && !chat.streaming) {
-    const harness = card.session ? harnessLabel(card.session.harness) : 'Agent';
-    desired.push(stateNode(chat, 'state:tail', 'working', h('div', { class: 'working' }, icon('loader', 13, 'spin'), `${harness} is working`)));
+  } else {
+    const busy = chatBusy(card, chat, items);
+    if (busy) desired.push(stateNode(chat, 'state:tail', `busy:${busy.label}|${busy.detail}|${busy.stoppable}`, thinkingBubble(card, busy, chat.busySince)));
   }
 
   let cursor = scroller.firstChild;
@@ -1746,6 +1969,82 @@ function renderChat(keepScroll = false) {
   }
 }
 
+const AWAIT_REPLY_MS = 90000;
+
+function latestSequence(items) {
+  let latest = 0;
+  for (const item of items) latest = Math.max(latest, item.sequence || 0);
+  return latest;
+}
+
+/**
+ * Says what the agent is doing right now, or null when it is idle: a
+ * message is on its way, the agent has not picked it up yet, it is
+ * thinking (with the step it reports), or it is writing its reply.
+ */
+function chatBusy(card, chat, items) {
+  const active = isSessionActive(card);
+  const harness = card && card.session ? harnessLabel(card.session.harness) : 'Agent';
+  if (chat.awaiting) {
+    const wait = chat.awaiting;
+    if (active || chat.streaming) wait.started = true;
+    const answered = items.some((item) => item.kind !== 'activity' && item.role === 'assistant' && !item.streaming && item.sequence > wait.sequence);
+    // The wait ends when the turn it started is over, or when nothing
+    // happened for too long to still call it waiting.
+    if ((wait.started && !active && !chat.streaming) || (answered && !active) || Date.now() - wait.at > AWAIT_REPLY_MS) chat.awaiting = null;
+  }
+  let busy = null;
+  if (ctx.sending) {
+    busy = { label: 'Sending your message...', detail: '', stoppable: false };
+  } else if (active || chat.streaming) {
+    let detail = '';
+    if (!chat.streaming) {
+      // The newest step the agent reports as still running.
+      for (let i = items.length - 1; i >= 0 && i >= items.length - 12; i -= 1) {
+        const item = items[i];
+        if (item.kind === 'activity' && (item.status === 'running' || item.status === 'pending' || item.status === 'in_progress')) {
+          detail = item.summary || item.activityKind.replace(/_/g, ' ');
+          break;
+        }
+      }
+    }
+    busy = { label: chat.streaming ? `${harness} is writing a reply...` : `${harness} is thinking...`, detail, stoppable: active };
+  } else if (chat.awaiting || chat.pending.length > 0) {
+    busy = { label: `Waiting for ${harness} to start...`, detail: '', stoppable: false };
+  }
+  if (!busy) chat.busySince = 0;
+  else if (!chat.busySince) chat.busySince = Date.now();
+  return busy;
+}
+
+/**
+ * The live row at the end of the conversation while the agent works: its
+ * mark, animated dots, what it is doing, for how long, and Stop.
+ */
+function thinkingBubble(card, busy, since) {
+  const harness = card && card.session ? card.session.harness : '';
+  return h(
+    'div',
+    { class: 'msg msg-assistant msg-thinking', role: 'status' },
+    h('div', { class: 'msg-head' }, brandIcon(harness, 14), h('span', { class: 'msg-role' }, harness ? harnessLabel(harness) : 'Agent'), elapsed(since, 2000)),
+    h(
+      'div',
+      { class: 'thinking-body' },
+      thinkingDots(),
+      h('span', { class: 'thinking-label' }, busy.label),
+      busy.detail ? h('span', { class: 'thinking-detail', title: busy.detail }, busy.detail) : null,
+      busy.stoppable
+        ? h(
+            'button',
+            { class: 'btn btn-sm btn-danger thinking-stop', type: 'button', title: 'Interrupt the running turn', onClick: (e) => withBusy(e.currentTarget, interrupt, null, 'Stopping...') },
+            icon('stop', 12),
+            h('span', null, 'Stop'),
+          )
+        : null,
+    ),
+  );
+}
+
 /** Caches placeholder rows (loading, empty, working) so they are not rebuilt on every poll. */
 function stateNode(chat, id, key, el) {
   const entry = chat.nodes.get(id);
@@ -1766,6 +2065,10 @@ async function sendMessage() {
   sessionStorageSet(ctx.sessionId, '');
   autoGrow(els.composerInput);
   ctx.sending = true;
+  const restoreSend = setButtonBusy(els.send, 'Sending...');
+  // The reply is awaited from here on: the conversation shows the agent
+  // at work until its turn is over.
+  chat.awaiting = { at: Date.now(), sequence: latestSequence(chat.items.values()), started: false };
   updateComposer();
   renderChat(true);
   scrollChatToEnd(false);
@@ -1773,6 +2076,7 @@ async function sendMessage() {
   try {
     await api.post(sessionPath(chat.sessionId, '/messages'), { text, clientMessageId: pending.id });
   } catch (err) {
+    chat.awaiting = null;
     chat.pending = chat.pending.filter((p) => p !== pending);
     if (ctx === active && !els.composerInput.value) {
       els.composerInput.value = text;
@@ -1781,10 +2085,13 @@ async function sendMessage() {
     }
     toastError(err);
   } finally {
+    restoreSend();
     if (ctx === active) {
       ctx.sending = false;
       updateComposer();
+      const follow = nearBottom();
       renderChat(true);
+      if (follow) scrollChatToEnd(false);
       clearTimeout(chat.timer);
       chat.timer = setTimeout(pollChat, 400);
       els.composerInput.focus();
@@ -1825,7 +2132,7 @@ export function updateDrawer() {
   );
   section('tags', card.tags, () => renderTags(card));
   if (!ctx.editing.summary || !ctx.sigs.summary) {
-    section('summary', [card.summary, card.summarySource, ctx.editing.summary, Boolean(card.aoSessionId), sectionCollapsed('summary', card)], () => renderSummary(card));
+    section('summary', [card.summary, card.summarySource, ctx.editing.summary, Boolean(card.aoSessionId), sectionCollapsed('summary', card), Boolean(ctx.summarizing)], () => renderSummary(card));
   }
   if (!ctx.editing.notes || !ctx.sigs.notes) {
     section('notes', [card.notes, ctx.editing.notes, sectionCollapsed('notes', card)], () => renderNotes(card));
@@ -1866,7 +2173,7 @@ export function updateDrawer() {
     );
     section(
       'sessionAlerts',
-      [session && [session.isTerminated, session.needsResume, session.activity && session.activity.state], card.sessionMissing, state.board.ao.connected, ctx.sessionError],
+      [session && [session.isTerminated, session.needsResume, session.activity && session.activity.state], card.sessionMissing, state.board.ao.connected, ctx.sessionError, Boolean(ctx.resuming)],
       () => renderSessionAlerts(card),
     );
     updateComposer();
@@ -1882,7 +2189,9 @@ export function updateDrawer() {
       // The agent started or finished a turn: refresh now instead of waiting
       // for the next scheduled poll.
       ctx.chat.wasActive = active;
+      const follow = nearBottom();
       renderChat(true);
+      if (follow) scrollChatToEnd(false);
       clearTimeout(ctx.chat.timer);
       ctx.chat.timer = setTimeout(pollChat, 150);
     }

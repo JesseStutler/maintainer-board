@@ -87,6 +87,18 @@ func (s *Store) IndexContent(ctx context.Context, sessionID string, msgs []Conte
 	})
 }
 
+// DeleteContent drops the indexed conversation of a session and its index
+// state, for a session that no longer exists.
+func (s *Store) DeleteContent(ctx context.Context, sessionID string) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM content_index WHERE session_id = ?`, sessionID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM content_index_state WHERE session_id = ?`, sessionID)
+		return err
+	})
+}
+
 // ContentHits returns, per session, how many indexed messages contain term
 // and the newest one of them. The match is a case-insensitive substring
 // match, which also works for text without word boundaries such as Chinese.

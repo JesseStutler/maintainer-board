@@ -25,7 +25,7 @@ func TestBuildSearchPrompt(t *testing.T) {
 		},
 	}
 	got := BuildSearchPrompt(in)
-	if !strings.HasPrefix(got, SearchPromptMarker+"\n") {
+	if !strings.HasPrefix(got, SearchPromptMarker+" ") || SearchPromptMarker != "[maintainer-board-search]" {
 		t.Fatalf("prompt does not start with the marker:\n%s", got)
 	}
 	for _, want := range []string{
@@ -181,6 +181,8 @@ func TestSearchFallsBackToCodex(t *testing.T) {
 	for _, tc := range cases {
 		var calls []string
 		ai := NewAI(t.TempDir())
+		// Without a summary model the chain is the CLI default, then codex.
+		ai.SummaryModel = ""
 		ai.Exec = func(ctx context.Context, cmd Command) (string, error) {
 			calls = append(calls, cmd.Name)
 			if _, ok := ctx.Deadline(); !ok {
@@ -226,5 +228,38 @@ func TestSearchFallsBackToCodex(t *testing.T) {
 	ai := NewAI(t.TempDir())
 	if ai.SearchTimeout <= ai.Timeout {
 		t.Errorf("SearchTimeout %v is not longer than the summary timeout %v", ai.SearchTimeout, ai.Timeout)
+	}
+}
+
+// attemptName describes one CLI invocation by the flags that tell the
+// attempts of the fallback chain apart.
+func attemptName(cmd Command) string {
+	name := cmd.Name
+	for i, arg := range cmd.Args[:len(cmd.Args)-1] {
+		if arg == "--model" || arg == "--reasoning-effort" {
+			name += " " + arg + " " + cmd.Args[i+1]
+		}
+	}
+	return name
+}
+
+func TestSearchUsesTheFastModelFirst(t *testing.T) {
+	const good = `{"matches": [{"cardId": "c_a", "reason": "Discusses CSI limits"}]}`
+	var calls []string
+	ai := NewAI(t.TempDir())
+	ai.Exec = func(_ context.Context, cmd Command) (string, error) {
+		calls = append(calls, attemptName(cmd))
+		if len(calls) == 1 {
+			return "", errors.New("copilot failed: unknown option --reasoning-effort")
+		}
+		return good, nil
+	}
+	got, engine, err := ai.Search(context.Background(), SearchInput{Query: "csi", Cards: []SearchCard{{ID: "c_a", Title: "CSI"}}})
+	if err != nil || engine != DefaultSummaryModel || len(got) != 1 {
+		t.Fatalf("Search = %+v, %q, %v", got, engine, err)
+	}
+	want := "copilot --model gemini-3.8-flash --reasoning-effort low,copilot --model gemini-3.8-flash"
+	if strings.Join(calls, ",") != want {
+		t.Fatalf("attempts = %v, want %s", calls, want)
 	}
 }

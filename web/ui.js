@@ -1,7 +1,7 @@
 // Toasts, modal dialogs and async-button helpers.
 
 import { h } from './util.js';
-import { icon, setIcon } from './icons.js';
+import { icon } from './icons.js';
 
 const TOAST_ICONS = { success: 'check-circle', error: 'x-circle', warning: 'alert', info: 'info' };
 
@@ -27,33 +27,98 @@ export function toastError(err) {
   toast(message, 'error');
 }
 
+/** A small rotating ring: something is in progress. */
+export function spinner(size = 14) {
+  return h('span', { class: 'spinner', role: 'presentation', 'aria-hidden': 'true', style: { width: `${size}px`, height: `${size}px` } });
+}
+
+/** Three dots in a slow wave: the agent or a model is thinking. */
+export function thinkingDots() {
+  return h('span', { class: 'thinking-dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'));
+}
+
+function elapsedText(since) {
+  const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+}
+
 /**
- * Runs an async action while the button is disabled and its icon spins.
- * Errors are shown as a toast unless onError handles them (returns true).
+ * A counter of the seconds since `since` ("3s", "1m 04s"). It stays empty
+ * for the first `after` milliseconds, so quick operations show no number,
+ * and stops by itself once the element left the page.
  */
-export async function withBusy(button, action, onError) {
-  if (button.disabled) return undefined;
+export function elapsed(since = Date.now(), after = 2000) {
+  const el = h('span', { class: 'elapsed mono', 'aria-hidden': 'true' });
+  const tick = () => {
+    el.textContent = Date.now() - since >= after ? elapsedText(since) : '';
+  };
+  tick();
+  const timer = setInterval(() => {
+    if (!el.isConnected && Date.now() - since > 1500) clearInterval(timer);
+    else tick();
+  }, 500);
+  return el;
+}
+
+/**
+ * A row that reports a running operation: spinner, label, optional detail
+ * and the elapsed time. `since` keeps the counter going across re-renders.
+ */
+export function statusStrip(label, { since = Date.now(), detail = '', dots = false, actions = [] } = {}) {
+  return h(
+    'div',
+    { class: 'status-strip', role: 'status' },
+    dots ? thinkingDots() : spinner(14),
+    h('span', { class: 'status-label' }, label),
+    detail ? h('span', { class: 'status-detail' }, detail) : null,
+    elapsed(since),
+    actions.length ? h('span', { class: 'status-actions' }, actions) : null,
+    h('span', { class: 'progress-strip', 'aria-hidden': 'true' }),
+  );
+}
+
+/**
+ * Puts a button into its busy state: disabled, with a spinner in place of
+ * its icon and, when given, `busyLabel` ("Resuming...") in place of its
+ * label. An icon-only button shows just the spinner. Returns a function
+ * that restores the button exactly as it was.
+ */
+export function setButtonBusy(button, busyLabel) {
+  if (button.getAttribute('aria-busy') === 'true') return () => {};
+  const saved = Array.from(button.childNodes);
+  const hadLabel = button.textContent.trim() !== '';
+  const wasDisabled = button.disabled;
   button.disabled = true;
-  const span = button.querySelector('.icon');
-  const original = span ? span.dataset.icon || null : null;
-  const originalNodes = span ? Array.from(span.childNodes) : null;
-  if (span) {
-    setIcon(span, 'loader', Number(span.dataset.size) || 14);
-    span.classList.add('spin');
-  }
+  button.setAttribute('aria-busy', 'true');
+  button.classList.add('is-busy');
+  const nodes = [spinner(13)];
+  // "btn-label" lets a collapsible header button hide the text as before.
+  if (hadLabel) nodes.push(h('span', { class: 'btn-label busy-label' }, busyLabel || button.textContent.trim()));
+  button.replaceChildren(...nodes);
+  return () => {
+    button.replaceChildren(...saved);
+    button.removeAttribute('aria-busy');
+    button.classList.remove('is-busy');
+    button.disabled = wasDisabled;
+  };
+}
+
+/**
+ * Runs an async action while the button shows its busy state (see
+ * setButtonBusy). Errors are shown as a toast unless onError handles them
+ * (returns true).
+ */
+export async function withBusy(button, action, onError, busyLabel) {
+  if (button.disabled) return undefined;
+  const restore = setButtonBusy(button, busyLabel);
   try {
     return await action();
   } catch (err) {
     if (!onError || !onError(err)) toastError(err);
     return undefined;
   } finally {
-    button.disabled = false;
-    if (span) {
-      span.classList.remove('spin');
-      span.replaceChildren(...originalNodes);
-      if (original) span.dataset.icon = original;
-      else delete span.dataset.icon;
-    }
+    restore();
   }
 }
 
@@ -69,7 +134,7 @@ function focusable(root) {
  * Opens a modal dialog. `body` and `foot` are nodes (or arrays of nodes).
  * Returns a controller with `close()` and the body and foot containers.
  */
-export function openModal({ title, size, body, foot, onClose }) {
+export function openModal({ title, size, body, foot, onClose, canClose }) {
   const previous = document.activeElement;
   const bodyEl = h('div', { class: 'modal-body' }, body);
   const footEl = foot ? h('div', { class: 'modal-foot' }, foot) : null;
@@ -115,7 +180,7 @@ export function openModal({ title, size, body, foot, onClose }) {
     foot: footEl,
     closed: false,
     close() {
-      if (controller.closed) return;
+      if (controller.closed || (canClose && !canClose())) return;
       controller.closed = true;
       backdrop.remove();
       const index = modalStack.indexOf(controller);
@@ -162,6 +227,70 @@ export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger
     confirm.addEventListener('click', () => {
       result = true;
       modal.close();
+    });
+    cancel.addEventListener('click', () => modal.close());
+  });
+}
+
+/**
+ * Asks the user to choose one of several actions, and runs the chosen one
+ * while the dialog stays open: its button shows `busyLabel` with a spinner,
+ * the others are disabled. A failure is shown inside the dialog, which then
+ * offers the choice again. Resolves to the `value` of the action that
+ * succeeded, or null when the dialog was cancelled.
+ *
+ * actions: [{ label, value, run, busyLabel, variant ('primary' | 'danger'
+ * | ''), icon, title, disabled, autofocus }]
+ */
+export function actionDialog({ title, message, actions, cancelLabel = 'Cancel', size = 'narrow' }) {
+  return new Promise((resolve) => {
+    let result = null;
+    let running = false;
+    const error = h('div', { class: 'field-error dialog-error', role: 'alert', hidden: true });
+    const cancel = h('button', { class: 'btn', type: 'button' }, cancelLabel);
+    const buttons = actions.map((action) => {
+      const variant = action.variant === 'danger' ? 'btn-danger-solid' : action.variant === 'primary' ? 'btn-primary' : '';
+      const button = h(
+        'button',
+        { class: ['btn', variant], type: 'button', title: action.title, disabled: Boolean(action.disabled), 'data-autofocus': action.autofocus ? true : null, dataset: { action: action.value } },
+        action.icon ? icon(action.icon, 14) : null,
+        h('span', null, action.label),
+      );
+      button.addEventListener('click', async () => {
+        if (running) return;
+        running = true;
+        error.hidden = true;
+        const others = [cancel, ...buttons].filter((b) => b !== button && !b.disabled);
+        for (const b of others) b.disabled = true;
+        const restore = setButtonBusy(button, action.busyLabel);
+        let failure = null;
+        try {
+          await action.run();
+        } catch (err) {
+          failure = err || new Error('Something went wrong.');
+        }
+        restore();
+        for (const b of others) b.disabled = false;
+        running = false;
+        if (failure) {
+          error.textContent = failure.message || 'Something went wrong.';
+          error.hidden = false;
+          return;
+        }
+        result = action.value;
+        modal.close();
+      });
+      return button;
+    });
+    const body = h('div', null, typeof message === 'string' ? h('p', { class: 'modal-text' }, message) : message, error);
+    const modal = openModal({
+      title,
+      size,
+      body,
+      foot: [h('span', { class: 'spacer' }), cancel, ...buttons],
+      // Closing in the middle of a request would hide its outcome.
+      canClose: () => !running,
+      onClose: () => resolve(result),
     });
     cancel.addEventListener('click', () => modal.close());
   });

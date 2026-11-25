@@ -4,7 +4,7 @@
 import { h, debounce, plural, relTime, storageGet, storageSet } from './util.js';
 import { hydrateIcons, setIcon, icon } from './icons.js';
 import { api } from './api.js';
-import { toast, toastError, withBusy, hasModal, closeTopModal } from './ui.js';
+import { toast, toastError, withBusy, hasModal, closeTopModal, spinner, elapsed } from './ui.js';
 import {
   state,
   subscribe,
@@ -159,6 +159,7 @@ async function runAISearch() {
       }
       return true;
     },
+    'Searching with AI...',
   );
   emit();
 }
@@ -193,7 +194,14 @@ function renderSearchBanner() {
     );
   const quoted = h('span', { class: 'query' }, `"${ai.query}"`);
   if (ai.status === 'running') {
-    banner.replaceChildren(icon('loader', 15, 'spin'), h('span', { class: 'banner-text' }, h('strong', null, 'AI Search:'), ' reading the board for ', quoted), h('span', { class: 'spacer' }), clear('Cancel'));
+    banner.replaceChildren(
+      spinner(15),
+      h('span', { class: 'banner-text' }, h('strong', null, 'Searching with AI:'), ' reading the board for ', quoted),
+      elapsed(),
+      h('span', { class: 'spacer' }),
+      clear('Cancel'),
+      h('span', { class: 'progress-strip', 'aria-hidden': 'true' }),
+    );
   } else if (ai.status === 'error') {
     banner.replaceChildren(icon('x-circle', 15), h('span', { class: 'banner-text' }, h('strong', null, 'AI Search failed:'), ` ${ai.error}`), h('span', { class: 'spacer' }), clear('Dismiss'));
   } else {
@@ -271,7 +279,8 @@ function renderHeader() {
 
   const sync = $('btn-sync');
   const span = sync.querySelector('.icon');
-  if (!sync.dataset.busy) {
+  // While the button runs its own sync it shows a spinner instead.
+  if (span && sync.getAttribute('aria-busy') !== 'true') {
     span.classList.toggle('spin', board.github.syncing);
   }
   const every = Math.round(board.github.intervalSeconds / 60) >= 1 ? `${Math.round(board.github.intervalSeconds / 60)} min` : `${board.github.intervalSeconds}s`;
@@ -383,6 +392,12 @@ function render() {
   checkNotifications();
 }
 
+/** Opens the card of a session that was just imported, once the board has it. */
+async function openImportedCard(cardId) {
+  await refreshBoard();
+  openDrawer(cardId);
+}
+
 function isTyping(target) {
   if (!target) return false;
   const tag = target.tagName;
@@ -404,7 +419,7 @@ function init() {
   subscribe(render);
 
   $('btn-new').addEventListener('click', () => openNewTask({ onCreated: (card) => openDrawer(card.id) }));
-  $('btn-import').addEventListener('click', () => openImport({ onImported: scheduleRefresh }));
+  $('btn-import').addEventListener('click', () => openImport({ onImported: scheduleRefresh, onOpenCard: openImportedCard }));
   $('btn-columns').addEventListener('click', () => openColumns({ onChanged: scheduleRefresh }));
   $('btn-theme').addEventListener('click', () => {
     const next = currentTheme() === 'dark' ? 'light' : 'dark';
@@ -417,20 +432,20 @@ function init() {
   });
   $('btn-notify').addEventListener('click', toggleNotifications);
   $('btn-sync').addEventListener('click', (e) => {
-    const button = e.currentTarget;
-    button.dataset.busy = '1';
-    withBusy(button, async () => {
-      const report = await api.post('/api/github/sync');
-      const parts = [`Synced ${plural(report.synced, 'item')}`];
-      if (report.updated > 0) parts.push(`${plural(report.updated, 'new update')}`);
-      if (report.moved > 0) parts.push(`${plural(report.moved, 'card')} moved`);
-      if (report.failed > 0) parts.push(`${report.failed} failed`);
-      toast(`${parts.join(', ')}.`, report.failed > 0 ? 'warning' : 'success');
-      if (report.failed > 0 && report.errors.length > 0) toast(report.errors[0], 'error');
-    }).finally(() => {
-      delete button.dataset.busy;
-      scheduleRefresh();
-    });
+    withBusy(
+      e.currentTarget,
+      async () => {
+        const report = await api.post('/api/github/sync');
+        const parts = [`Synced ${plural(report.synced, 'item')}`];
+        if (report.updated > 0) parts.push(`${plural(report.updated, 'new update')}`);
+        if (report.moved > 0) parts.push(`${plural(report.moved, 'card')} moved`);
+        if (report.failed > 0) parts.push(`${report.failed} failed`);
+        toast(`${parts.join(', ')}.`, report.failed > 0 ? 'warning' : 'success');
+        if (report.failed > 0 && report.errors.length > 0) toast(report.errors[0], 'error');
+      },
+      null,
+      'Syncing...',
+    ).finally(scheduleRefresh);
   });
 
   const search = $('search');

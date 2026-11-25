@@ -30,6 +30,8 @@ forked or modified.
 - [The card workspace](#the-card-workspace)
 - [Models](#models)
 - [Summaries](#summaries)
+- [Import History](#import-history)
+- [Deleting cards and sessions](#deleting-cards-and-sessions)
 - [Architecture](#architecture)
 - [HTTP API](#http-api)
 - [Running in the background](#running-in-the-background)
@@ -92,8 +94,16 @@ forked or modified.
 - Start a new Copilot or Codex session from any card, or link an existing one.
 - Choose the model and reasoning effort when starting a session, and switch
   them for a running one. See [Models](#models).
-- Import historical Copilot and Codex sessions through AO, with search and
-  filters.
+- Import historical Copilot and Codex sessions through AO. The history is
+  searchable by session ID (native UUID or AO ID), by title, folder and
+  branch, by what was said in the conversation, and by meaning with
+  `AI Search`. See [Import History](#import-history).
+- Deleting a card asks whether its AO session should be deleted from Agent
+  Orchestrator too or kept there. See
+  [Deleting cards and sessions](#deleting-cards-and-sessions).
+- Slow operations (resume, AI summary, AI search, sending, sync, delete)
+  show a spinner with a label on their button and a status row with the
+  elapsed time where the result will appear.
 
 ## Requirements
 
@@ -159,7 +169,11 @@ Host linux-host
 | `--ao-sync-interval` | `5s` | AO session sync period. AO events trigger an immediate sync in between. |
 | `--gh-path` | `gh` | Path of the `gh` CLI. |
 | `--gh-user` | the account `gh` is logged in as | Your GitHub login, for the `MINE` tag, the `Mine` filter and your own review status. Detected with `gh api user`; when that fails at startup the board runs without it and asks again before every GitHub sync. |
-| `--summary-model` | `gemini-4-neon` | Model the Copilot CLI uses for `Summarize with AI`. Empty uses the CLI's default model. |
+| `--summary-model` | `gemini-3.8-flash` | Model the Copilot CLI uses for `Summarize with AI` and both AI searches. Empty uses the CLI's default model. |
+| `--summary-effort` | `low` | Reasoning effort passed with `--summary-model` (`--reasoning-effort`). Empty passes none. A model that rejects the effort is asked again without it. |
+| `--copilot-path` | `copilot` | Path of the `copilot` CLI used by the AI features. |
+| `--codex-path` | `codex` | Path of the `codex` CLI, the last fallback of the AI features. |
+| `--history-home` | your home directory | Home directory whose `.copilot` and `.codex` session stores enrich and search Import History. They are only read. |
 | `--ci-ignore-contexts` | `tide` | Comma-separated status contexts and check names left out of the CI rollup. |
 | `--prow-approval-labels` | `true` | Treat the `lgtm` + `approved` label pair as an approval. |
 | `--allowed-hosts` | none | Extra `Host` header values to accept besides loopback. |
@@ -359,9 +373,10 @@ column, or to the first remaining column. The last column cannot be deleted.
   sessions are skipped unless `Show Orchestrator` is on or you link one
   manually.
 - The card title follows AO renames until you edit the title yourself.
-- Deleting a card, or unlinking its session, tells the board not to create a
-  new card for that session. Link it again from another card whenever you
-  want.
+- Deleting only a card, or unlinking its session, tells the board not to
+  create a new card for that session, however often the AO sync runs. Link
+  or import it again whenever you want it back. See
+  [Deleting cards and sessions](#deleting-cards-and-sessions).
 - Imported sessions (`needsResume`) show their history immediately. The
   agent has to be resumed before it accepts messages. If AO answers
   `SESSION_OPEN_ELSEWHERE`, close the session in the other terminal and
@@ -383,18 +398,29 @@ Clicking a card opens it in a drawer on the right.
   Maintainer Notes and Timeline each fold to one line with a preview, and
   `Hide Details` gives the whole height to the conversation. GitHub Tracking
   opens by itself when there are unread updates or a sync error.
-- **Expand** (the button in the header, or `F`) switches to a full-width
-  workspace: a context rail of 340px on the left (Summary, GitHub status and
-  delta, Notes, Controls, Timeline; `Hide Context` folds it away) and the
-  conversation on the right in a centered reading column of at most 900px,
-  with the message box at the bottom.
-- **Split Board** (or `F`, or `Esc`) returns to the drawer next to the
-  board; `Back to Board` closes the card.
+- **Expand** (the tinted, labelled button next to Close in the header, or
+  `F`) switches to a full-width workspace: a context rail of 340px on the
+  left (Summary, GitHub status and delta, Notes, Controls, Timeline;
+  `Hide Context` folds it away) and the conversation on the right in a
+  centered reading column of at most 900px, with the message box at the
+  bottom.
+- **Collapse** (the same button, now leading the header; or `F`, or `Esc`)
+  returns to the side drawer with the same card still open: the draft in the
+  message box, open editors and the place you were reading in the
+  conversation are kept. Only **Close** (the `X` at the far right) goes back
+  to the board.
 
 Keyboard: `/` focuses the search, `N` opens the new task dialog, `F` toggles
-the expanded workspace, `Esc` goes back one step (field, workspace, drawer),
-`Ctrl+Enter` sends a message, saves an editor, or starts AI Search from the
-search box.
+the expanded workspace, `Esc` goes back one step (field, workspace, drawer,
+board), `Ctrl+Enter` sends a message, saves an editor, or starts AI Search
+from a search box.
+
+While the agent works, the conversation ends with a live row: the agent's
+mark, animated dots, what it is doing (`Sending your message...`,
+`Waiting for Codex to start...`, `Codex is thinking...` with the step it
+reports, `Codex is writing a reply...`), the elapsed time and a `Stop`
+button. `Resume Session` shows `Waking up agent session...` until AO has
+restarted the agent.
 
 ## Models
 
@@ -420,18 +446,111 @@ is not exposed by the board.
 - **AUTO**: extracted from the latest substantial assistant message of the
   session, stripped of Markdown, at most about 180 characters. It costs no
   tokens and refreshes when the session sees new activity.
-- **AI**: `Summarize with AI` sends the recent turns and the linked pull
-  request or issue status to the local `copilot` CLI and asks for one or two
-  natural sentences in Simplified Chinese: what the session is working on,
-  and the conclusion or next step so far. Identifiers, `#numbers` and API
-  names are kept as they are. Three attempts are made in order, 45 s each:
-  `copilot --model gemini-4-neon` (change the model with `--summary-model`),
-  `copilot` with its default model, then `codex exec`. The answer is cleaned
-  of Markdown, labels and filler and capped at 180 characters on a sentence
-  boundary. The CLIs run in an empty scratch directory with shell and write
-  tools denied (Copilot) or a read-only sandbox (Codex).
+- **AI**: `Summarize with AI` asks the local `copilot` CLI what the card is
+  about: the purpose of the pull request, issue or task, not how far the
+  work got. The prompt therefore carries the linked GitHub item with its
+  description (fetched with `gh`), your notes and the opening of the session
+  (the first three requests of the user and the agent's first reply) rather
+  than the end of the conversation; the latest turns are added only when
+  there is no opening request, or a terse one without a linked item. The
+  answer is one or two natural sentences in Simplified Chinese (roughly 30
+  to 90 characters); identifiers and `#numbers` are kept as they are. While
+  it runs, the button reads `Summarizing...` and the Summary section shows
+  `Generating summary with AI...` with the elapsed time.
+
+  The attempts, 45 s each, in order:
+
+  1. `copilot --model gemini-3.8-flash --reasoning-effort low`, which
+     answers in about 7 seconds (`--summary-model`, `--summary-effort`);
+  2. `copilot --model gemini-3.8-flash` without the effort, for a configured
+     model that rejects it (skipped when attempt 1 timed out);
+  3. `copilot` with its default model;
+  4. `codex exec`.
+
+  The answer is cleaned of Markdown, labels and filler and capped at 180
+  characters on a sentence boundary. The CLIs run in an empty scratch
+  directory with shell and write tools denied (Copilot) or a read-only
+  sandbox (Codex). Line 1 of every prompt starts with
+  `[maintainer-board-summary]` (`[maintainer-board-search]` for the two AI
+  searches, which use the same attempts), which is how these runs are kept
+  out of Import History.
 - **MANUAL**: anything you type. Manual and AI summaries are never
   overwritten by extraction; clearing the summary hands control back to AUTO.
+
+## Import History
+
+`Import History` lists the Copilot and Codex sessions AO finds on this
+machine and imports the ones you pick. To find an older session whose title
+you forgot, the board reads the local session stores itself, read-only:
+`~/.copilot/session-store.db` (sessions, turns, checkpoints) and the rollout
+files under `~/.codex/sessions/`. A local session is matched to an AO
+candidate by AO's candidate ID, `sha256(harness, NUL, config dir, NUL,
+native ID)`. A store that is missing or unreadable only means less detail.
+
+- Each row shows the agent, the title, a preview of what you asked (or the
+  stored checkpoint summary), the first 8 characters of the **native session
+  ID** (hover for the full UUID, click to copy), the **AO session ID** when
+  the session is already imported, the project or folder, the message count
+  and the last activity. `Import` on a row imports that session and opens
+  its card; the checkboxes import several at once.
+- **Typing** in the search box ranks the history on the server
+  (`GET /api/ao/import-history/search`) and says why each row matched:
+  - `Matched ID: 01a1c02a-...`: the beginning of a native UUID (or of one of
+    its groups), the AO session ID such as `volcano-2`, or AO's candidate ID;
+  - `Matched conversation: "..."` with an excerpt: your prompts, the agent's
+    replies and checkpoint summaries;
+  - `Matched title`, `Matched summary`, `Matched branch`, `Matched folder`.
+
+  Every word has to match somewhere; a query of three or more words may miss
+  one (`Partial match`). A word that is not found literally still matches a
+  similar one (`Close match`): one or two typos, an abbreviation such as
+  `podgrp`, or a Chinese phrase that is worded a little differently.
+- **AI Search** (the button next to the box, or `Ctrl+Enter`) sends your
+  description and a compact catalog to the fast summary model: the 60 most
+  recent sessions plus the best keyword matches among the older ones, each
+  with its ID, title, folder, branch, date, first prompts and summary. The
+  model returns up to 8 sessions with a short reason in the language of your
+  query; they are listed in that order with `AI match: ...`, and `Reset`
+  returns to the list.
+- The board's own `Summarize with AI` and `AI Search` runs are never listed,
+  whatever their title was shortened or renamed to: the AO title, the stored
+  title and the first prompt are all checked, and so is the directory the
+  session ran in (the `summarizer` directory next to the database, where the
+  AI CLIs are started).
+
+Reading a Codex rollout stops at the first megabyte and the last 256 KB of a
+file (the requests of the user sit there; the rest is tool output), files
+are parsed in parallel, and a scan is cached for 30 seconds, so a history of
+a few hundred megabytes is listed in well under a second.
+
+## Deleting cards and sessions
+
+Three different things, kept apart in the UI:
+
+| Action | The card | The AO session |
+| --- | --- | --- |
+| **Delete Card Only** | removed | stays in Agent Orchestrator; gets no new card |
+| **Delete Card & AO Session** | removed | terminated and permanently deleted from AO |
+| **Unlink** (session bar) | stays, without a session | stays in Agent Orchestrator; gets no new card |
+| **Delete Session** (session bar) | stays, without a session | terminated and permanently deleted from AO |
+
+- Deleting a card that has a session opens a dialog that names the session
+  and offers `Delete Card & AO Session`, `Delete Card Only` and `Cancel`. A
+  card without a session asks a plain `Delete Card`.
+- Deleting an AO session kills it first (`POST /api/v1/sessions/{id}/kill`;
+  already terminated or unknown is fine) and then calls
+  `DELETE /api/v1/sessions/{id}?cleanup=true`, which removes the session,
+  its AO conversation history and its worktree. Git branches and pull
+  requests are kept. While AO is still tearing the session down the delete
+  is retried for a few seconds.
+- AO never forces a worktree with uncommitted changes or a lock. In that
+  case, or when AO is offline, the dialog shows AO's reason and **nothing is
+  removed**, neither the card nor the link. Commit or discard the changes
+  (or run `ao session cleanup`) and delete again.
+- A session that stays in AO after `Delete Card Only` or `Unlink` is
+  remembered as dismissed, so the AO sync, which runs every few seconds,
+  does not create a second card for it. Linking it to a card or importing it
+  again lifts that.
 
 ## Architecture
 
@@ -445,12 +564,14 @@ is not exposed by the board.
      |                     content_index (conversation text for search)
      |-- internal/ao       typed client for the AO daemon API
      |-- internal/github   gh wrapper, update detection, auto-move rules
-     |-- internal/summary  summary extraction and the AI summarizer
+     |-- internal/summary  summary extraction, the AI summarizer and searches
+     |-- internal/history  read-only index of the local Copilot and Codex stores
      |-- web/              index.html, styles.css, *.js (go:embed)
      |
      |-- HTTP --> AO daemon (http://127.0.0.1:3001)
      |-- exec --> gh (pull requests and issues)
-     '-- exec --> copilot / codex (AI summaries and AI search only)
+     |-- exec --> copilot / codex (AI summaries and AI search only)
+     '-- read --> ~/.copilot/session-store.db, ~/.codex/sessions (Import History)
 ```
 
 Layout:
@@ -460,7 +581,8 @@ cmd/maintainer-board/main.go   flags, wiring, graceful shutdown
 internal/db/                   schema, migrations, CRUD, ordering
 internal/ao/                   AO client: sessions, conversation, spawn, import, events
 internal/github/               reference parsing, gh client, decision engine
-internal/summary/              extraction, prompt, copilot/codex runner
+internal/summary/              extraction, prompts, copilot/codex runner
+internal/history/              local Copilot and Codex session stores
 internal/server/               handlers, AO sync, GitHub sync, security middleware
 web/                           the single-page UI
 scripts/                       optional browser tests (headless Chromium)
@@ -476,7 +598,8 @@ notification toggle) in `localStorage`.
 AO endpoints used: `GET/POST /api/v1/sessions`, `PATCH /api/v1/sessions/{id}`,
 `GET /api/v1/sessions/{id}/conversation`,
 `POST .../conversation/messages`, `POST .../conversation/interrupt`,
-`POST .../resume-agent`, `POST .../kill`, `GET /api/v1/projects`,
+`POST .../resume-agent`, `POST .../kill`,
+`DELETE /api/v1/sessions/{id}?cleanup=true`, `GET /api/v1/projects`,
 `GET/POST /api/v1/session-import`, `GET /api/v1/events`,
 `GET /api/v1/agents/{agent}/models`,
 `GET /api/v1/sessions/{id}/conversation/models` and
@@ -486,7 +609,8 @@ AO endpoints used: `GET/POST /api/v1/sessions`, `PATCH /api/v1/sessions/{id}`,
 `gh pr view {n} --repo {repo} --json ...`, `gh api repos/{repo}/pulls/{n}`
 (exact counts), `gh issue view {n} --repo {repo} --json ...`,
 `gh api graphql` for unresolved review threads, only for PRs that are
-approved with green CI, and `gh api user` once to learn your login.
+approved with green CI, and `gh api user` once to learn your login. An AI
+summary reads the description of the linked item with the first of these.
 
 ## HTTP API
 
@@ -503,7 +627,10 @@ All bodies are JSON. Errors have the shape
 | `PATCH /api/columns/{id}`, `DELETE /api/columns/{id}` | Update title, color, role; delete. |
 | `POST /api/columns/reorder` | `{"ids": ["inbox", "..."]}` left to right. |
 | `GET /api/cards`, `POST /api/cards` | List; create `{"title", "category", "columnId", "tags", "notes", "summary", "githubRef", "aoSessionId", "agent": {"harness", "prompt", "projectId", "model", "effort"}}`. |
-| `GET /api/cards/{id}`, `PATCH /api/cards/{id}`, `DELETE /api/cards/{id}` | Read; update `title`, `category`, `tags`, `summary`, `notes`, `autoMove`, `columnId`, `aoSessionId`; delete. |
+| `GET /api/cards/{id}`, `PATCH /api/cards/{id}` | Read; update `title`, `category`, `tags`, `summary`, `notes`, `autoMove`, `columnId`, `aoSessionId`. |
+| `DELETE /api/cards/{id}` | Delete the card; its AO session stays in AO and is dismissed. With `?deleteAoSession=true` (or the body `{"deleteAoSession": true}`) the session is killed and deleted from AO first; if AO refuses, the error carries AO's code (for example `409 WORKSPACE_DIRTY`) and nothing is removed. Answers `{"deleted", "aoSessionId", "aoSessionDeleted"}`. |
+| `DELETE /api/cards/{id}/session` | Kill the card's AO session, delete it from AO and detach it; the card stays. `409 NO_SESSION` without one. |
+| `POST /api/cards/{id}/unlink` | Detach the AO session from the card only; the session stays in AO and is dismissed. |
 | `PATCH /api/cards/{id}/move` | `{"columnId", "position"}` (0-based). |
 | `GET /api/cards/{id}/events` | Audit timeline, newest first. |
 | `POST /api/cards/{id}/link-github` | `{"ref": "#6247"}` |
@@ -511,7 +638,7 @@ All bodies are JSON. Errors have the shape
 | `POST /api/cards/{id}/sync-github` | Fetch now; returns the card, `newUpdate`, `moved`. |
 | `POST /api/cards/{id}/ack` | Mark caught up or reviewed; optional `{"moveToColumnId": "waiting"}`. Also records your review (`REVIEWED` when GitHub has none). |
 | `POST /api/cards/{id}/unreview` | Remove a `REVIEWED` mark set on the board. `409 REVIEW_FROM_GITHUB` for a review submitted on GitHub. |
-| `POST /api/cards/{id}/summarize` | AI summary; returns the card, `summary`, `engine`. |
+| `POST /api/cards/{id}/summarize` | AI summary of what the card is about; returns the card, `summary`, `engine`. |
 | `POST /api/cards/{id}/session` | Start an agent session: `{"harness": "copilot" or "codex", "prompt", "projectId", "model", "effort"}`. |
 | `GET /api/cards/{id}/models` | Models the card's session can use and the selected `model` and `reasoningEffort`. `source` is `session`, or `agent` when the session is not running and its agent's catalog is returned. |
 | `PATCH /api/cards/{id}/settings` | `{"model", "reasoningEffort"}`, either or both; an empty string resets to the default. Applies from the next turn. |
@@ -524,7 +651,10 @@ All bodies are JSON. Errors have the shape
 | `POST /api/sessions/{id}/messages` | `{"text", "clientMessageId"}`, answers 202. |
 | `POST /api/sessions/{id}/interrupt`, `/resume`, `/kill` | Session control. AO error codes such as `SESSION_OPEN_ELSEWHERE` are passed through. |
 | `PATCH /api/sessions/{id}` | Rename in AO: `{"displayName"}`. |
-| `GET /api/import/candidates`, `POST /api/import` | List history; import `{"ids": [...]}` and create cards. |
+| `GET /api/ao/import-history` | AO's import candidates without the board's own AI runs, each with `nativeId`, `summary`, `preview` and `branch` when the local stores know the session, and `cardId` when it is imported. `GET /api/import/candidates` is the same. |
+| `GET /api/ao/import-history/search?q=...` | Ranked matches by ID, metadata and conversation text: `{"query", "total", "matches": [{"candidate", "matchedBy", "score", "reason", "snippet"}]}`. |
+| `POST /api/ao/import-history/ai-search` | `{"query"}`; AI search by meaning: `{"query", "provider", "matches": [{"candidate", "reason"}]}`, best match first. `409 AI_SEARCH_BUSY` while another AI search runs. |
+| `POST /api/import` | Import `{"ids": [...]}` and create cards. |
 
 Example:
 
@@ -602,12 +732,14 @@ node --test web/tests/         # Markdown parser and board logic tests (needs No
 The Go tests cover the schema, its migrations from an older database and
 ordering, reference parsing, the update detection and auto-move state
 machine, the `gh` output parsing including your own review and Prow
-commands, the conversation index and both searches, the AI prompt, answer
-parsing and engine fallback, the AO client against a fake daemon, every HTTP
-handler against fake AO and GitHub backends, and a guard that keeps emoji
-out of the repository.
+commands, the conversation index and both searches, the AI prompts, answer
+parsing and engine fallback, the local Copilot and Codex history index
+(against a real SQLite store and rollout files in a temporary directory),
+the Import History search and AI search, the AO client against a fake
+daemon including session deletion, every HTTP handler against fake AO and
+GitHub backends, and a guard that keeps emoji out of the repository.
 
-Three optional browser tests drive a headless Chromium through the DevTools
+Four optional browser tests drive a headless Chromium through the DevTools
 protocol (no npm packages; set `CHROMIUM` if the binary is not
 `chromium-browser`):
 
@@ -615,12 +747,14 @@ protocol (no npm packages; set `CHROMIUM` if the binary is not
 node scripts/ui-smoke.mjs  http://127.0.0.1:3012       # read-only walkthrough, screenshots
 node scripts/ui-flow.mjs   http://127.0.0.1:3913       # creates and deletes cards and columns
 node scripts/ui-models.mjs http://127.0.0.1:3916 http://127.0.0.1:3915   # model selection
+node scripts/ui-import-delete.mjs http://127.0.0.1:3926 http://127.0.0.1:3925 data/scratch/import/home   # import search, progress, deletes
 ```
 
 `ui-smoke.mjs` only reads: it checks typography, the card faces against the
 API data, the author filter, search by session ID and by conversation text,
-the drawer width and resizing, the expanded workspace, the model pickers and
-both themes. It changes no card, no session and no model.
+the drawer width and resizing, the expanded workspace, the model pickers,
+the Import History dialog with a search by native session ID, and both
+themes. It changes no card, no session and no model.
 
 `ui-flow.mjs` modifies the board, so run it against a scratch instance:
 
@@ -640,6 +774,30 @@ node scripts/fake-ao.mjs 3915 &
 ./maintainer-board --addr 127.0.0.1:3916 --db data/scratch/models.db --ao-url http://127.0.0.1:3915
 ```
 
+`ui-import-delete.mjs` imports, messages, resumes and deletes sessions, and
+runs AI summaries and searches. It needs the fake AO daemon as well, plus
+`scripts/fake-ai.mjs` in place of the `copilot` and `codex` CLIs and a
+scratch history directory, into which it writes a small Copilot store
+(with `python3`) and two Codex rollouts:
+
+```sh
+dir=$PWD/data/scratch/import; rm -rf "$dir"; mkdir -p "$dir"
+FAKE_AO_DELAY_MS=700 node scripts/fake-ao.mjs 3925 &
+FAKE_AI_DELAY_MS=2600 FAKE_AI_LOG=$dir/ai.log ./maintainer-board --addr 127.0.0.1:3926 --db "$dir/board.db" \
+  --ao-url http://127.0.0.1:3925 --ao-sync-interval 1s --history-home "$dir/home" \
+  --copilot-path "$PWD/scripts/fake-ai.mjs" --codex-path "$PWD/scripts/fake-ai.mjs" &
+FAKE_AI_LOG=$dir/ai.log node scripts/ui-import-delete.mjs http://127.0.0.1:3926 http://127.0.0.1:3925 "$dir/home"
+```
+
+It checks the Expand button and the way back from the workspace (Collapse,
+`F`, `Esc`, Close), the reading position across both layouts, Import History
+(IDs on the rows, search by ID, by conversation text and with a typo, AI
+Search with its progress and the flags the CLI was called with, import from
+a row), the progress indicators of Summarize, Send and Resume, Unlink
+against Delete AO Session, and every way to delete a card, including a
+delete that AO refuses and a check that a dismissed session gets no new
+card from the AO sync.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -652,7 +810,9 @@ node scripts/fake-ao.mjs 3915 &
 | `Summarize with AI` or `AI Search` fails | `copilot` or `codex` must be on `PATH` and logged in. The error names the CLI that failed. |
 | No `MINE` tag, no `Mine` filter, no `You:` status | The board does not know your login. Check `gh api user`, or start with `--gh-user`. |
 | A search does not find text from a chat | The index follows AO in the background; give a new or long session a few seconds. Messages that are still streaming are indexed once complete. |
-| A deleted card's session should come back | Create a task and choose `Existing Session`, or link it from a card's Agent Session section. |
+| A deleted card's session should come back | Create a task and choose `Existing Session`, or link it from a card's Agent Session section. An imported session can also be imported again. |
+| `Delete Card & AO Session` says AO refused | The worktree of the session has uncommitted changes or is locked. Commit or discard them, or run `ao session cleanup`, then delete again. Nothing was removed. |
+| Import History shows no ID or preview for a session | The local store that holds it was not found or not readable: `~/.copilot/session-store.db`, `~/.codex/sessions/`, or the directory given with `--history-home`. AO must scan the same home directory. |
 | Resume answers "open in another terminal" | Exit the agent in that terminal (or in AO desktop), then resume again. |
 
 ## Known limitations
@@ -664,6 +824,12 @@ node scripts/fake-ao.mjs 3915 &
 - Each `Summarize with AI` and `AI Search` run through Copilot is stored by
   the Copilot CLI as a session of its own. The board hides those runs in its
   Import History list; other tools will still show them.
+- Import History searches the first megabyte and the last 256 KB of a Codex
+  rollout file. A prompt in the middle of a very long session is found
+  through AO once the session is imported (board search), not before.
+- Deleting an AO session is AO's `ao session delete --cleanup`: it removes
+  the session record and AO's history of it. The board does not delete
+  anything from the Copilot or Codex stores itself.
 - Unread tracking counts all activity, including your own: after you submit
   a review on GitHub the card shows the new comment as unread until you mark
   it caught up. Your own review status is not affected by that.

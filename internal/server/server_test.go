@@ -30,6 +30,7 @@ type fakeAO struct {
 	projects      []ao.Project
 	conversations map[string]*ao.Conversation
 	candidates    []ao.ImportCandidate
+	candidatesErr error
 	listErr       error
 	resumeErr     error
 	spawnErr      error
@@ -39,6 +40,14 @@ type fakeAO struct {
 	killed        []string
 	renamed       []string
 	nextID        int
+	// deleted lists the sessions removed with DeleteSession; deleteErr
+	// makes it fail the way AO refuses a delete.
+	deleted   []string
+	deleteErr error
+	// convQueries records every conversation request; latest overrides
+	// the latest sequence a session reports.
+	convQueries []ao.ConversationQuery
+	latest      map[string]int64
 
 	// Model catalogs per agent, model pickers per session, and every
 	// settings change received.
@@ -138,9 +147,13 @@ func (f *fakeAO) Conversation(_ context.Context, id string, q ao.ConversationQue
 	if !ok {
 		return nil, &ao.APIError{Status: 404, Code: "SESSION_NOT_FOUND", Message: "session not found"}
 	}
+	f.convQueries = append(f.convQueries, q)
 	out := *conv
 	out.LatestSequence = int64(q.Limit) // lets tests observe the forwarded limit
 	out.OldestSequence = q.BeforeSequence
+	if v, ok := f.latest[id]; ok {
+		out.LatestSequence = v
+	}
 	return &out, nil
 }
 
@@ -176,6 +189,24 @@ func (f *fakeAO) Kill(_ context.Context, id string) error {
 	return nil
 }
 
+// DeleteSession removes the session, like AO after a kill and a delete.
+func (f *fakeAO) DeleteSession(_ context.Context, id string, cleanup bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, fmt.Sprintf("%s cleanup=%v", id, cleanup))
+	kept := f.sessions[:0:0]
+	for _, sess := range f.sessions {
+		if sess.ID != id {
+			kept = append(kept, sess)
+		}
+	}
+	f.sessions = kept
+	return nil
+}
+
 func (f *fakeAO) Rename(_ context.Context, id, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -186,6 +217,9 @@ func (f *fakeAO) Rename(_ context.Context, id, name string) error {
 func (f *fakeAO) ImportCandidates(context.Context) ([]ao.ImportCandidate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.candidatesErr != nil {
+		return nil, f.candidatesErr
+	}
 	return f.candidates, nil
 }
 
@@ -223,6 +257,18 @@ type fakeGitHub struct {
 	items map[string]*github.Item
 	err   error
 	kinds []string
+	// bodies holds the description of an item by "repo#number".
+	bodies map[string]string
+}
+
+func (f *fakeGitHub) Description(_ context.Context, repo string, number int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, ok := f.bodies[fmt.Sprintf("%s#%d", repo, number)]
+	if !ok {
+		return "", github.ErrNotFound
+	}
+	return body, nil
 }
 
 func (f *fakeGitHub) Fetch(_ context.Context, repo string, number int, knownKind string) (*github.Item, error) {
@@ -266,6 +312,24 @@ type fakeAI struct {
 	// searchGate, when set, blocks Search until it is closed.
 	searchGate    chan struct{}
 	searchStarted chan struct{}
+
+	// AI history search: the answer to give, and what was asked.
+	historyMatches []summary.HistoryMatch
+	historyErr     error
+	historyInput   summary.HistoryInput
+	historyCalls   int
+}
+
+func (f *fakeAI) SearchHistory(_ context.Context, in summary.HistoryInput) ([]summary.HistoryMatch, string, error) {
+	f.historyCalls++
+	f.historyInput = in
+	if f.searchStarted != nil {
+		close(f.searchStarted)
+	}
+	if f.searchGate != nil {
+		<-f.searchGate
+	}
+	return f.historyMatches, "gemini-3.8-flash", f.historyErr
 }
 
 func (f *fakeAI) Search(_ context.Context, in summary.SearchInput) ([]summary.SearchMatch, string, error) {
@@ -1921,13 +1985,23 @@ func TestImport(t *testing.T) {
 	hn.ao.candidates = []ao.ImportCandidate{
 		{ID: "a", Harness: "codex", Title: "review #6247", MessageCount: 30},
 		{ID: "b", Harness: "copilot", Title: "Existing", SessionID: "volcano-2", MessageCount: 4},
-		{ID: "s", Harness: "copilot", Title: summary.PromptMarker[:60] + "\u2026", MessageCount: 2},
+		{ID: "s", Harness: "copilot", Title: summary.PromptMarker + " Describe what a card on a software\u2026", MessageCount: 2},
+		{ID: "q", Harness: "copilot", Title: summary.SearchPromptMarker + " You are searching", MessageCount: 2},
+		{ID: "old", Harness: "copilot", Title: "You are writing a status summary for a card on a software maintainer's\u2026", MessageCount: 2},
 	}
 	hn.syncAO()
 
-	list := hn.must(200, "GET", "/api/import/candidates", nil)["candidates"].([]any)
+	list := hn.must(200, "GET", "/api/ao/import-history", nil)["candidates"].([]any)
 	if len(list) != 2 {
-		t.Fatalf("candidates = %v; the board's own summarizer runs must be hidden", list)
+		t.Fatalf("candidates = %v; the board's own summarizer and search runs must be hidden", list)
+	}
+	// The path of the first release answers the same.
+	if legacy := hn.must(200, "GET", "/api/import/candidates", nil)["candidates"].([]any); !reflect.DeepEqual(legacy, list) {
+		t.Fatalf("legacy path = %v, want %v", legacy, list)
+	}
+	// Without a local history index the AO fields pass through unchanged.
+	if first := list[0].(map[string]any); first["id"] != "a" || first["title"] != "review #6247" || first["messageCount"] != float64(30) || first["nativeId"] != nil {
+		t.Fatalf("plain candidate = %v", first)
 	}
 	if imported := list[1].(map[string]any); imported["sessionId"] != "volcano-2" || imported["cardId"] != hn.cardBySession("volcano-2").ID {
 		t.Fatalf("imported candidate = %v", imported)

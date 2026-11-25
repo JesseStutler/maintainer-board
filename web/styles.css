@@ -198,6 +198,207 @@ a:hover {
   }
 }
 
+/* Progress indicators: a ring for "working", dots for "thinking", a strip
+   for "this row is alive". All of them inherit the text color. */
+
+.spinner {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
+  height: 14px;
+}
+
+.thinking-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.25;
+  animation: dot-wave 1.2s ease-in-out infinite;
+}
+
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes dot-wave {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.progress-strip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.progress-strip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  border-radius: 2px;
+  background: currentColor;
+  animation: strip-slide 1.3s ease-in-out infinite;
+}
+
+@keyframes strip-slide {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(265%);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* A running operation, reported where its result will appear. */
+.status-strip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 8px 12px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: var(--radius);
+  background: linear-gradient(100deg, var(--accent-subtle) 30%, color-mix(in srgb, var(--accent) 20%, transparent) 50%, var(--accent-subtle) 70%);
+  background-size: 200% 100%;
+  color: var(--accent);
+  font-size: 13.5px;
+  animation: shimmer 2.4s linear infinite;
+}
+
+.status-strip.is-ai {
+  border-color: color-mix(in srgb, var(--merged) 36%, transparent);
+  background-image: linear-gradient(100deg, var(--merged-subtle) 30%, color-mix(in srgb, var(--merged) 22%, transparent) 50%, var(--merged-subtle) 70%);
+  color: var(--merged);
+}
+
+.status-strip .status-label {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.status-strip .status-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-strip .status-actions {
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.elapsed {
+  flex: none;
+  color: var(--text-subtle);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.elapsed:empty {
+  display: none;
+}
+
+/* A button whose action is running: clearly alive, not greyed out. */
+.btn.is-busy,
+.btn.is-busy:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+
+.btn.is-busy:not(.btn-primary):not(.btn-danger-solid) {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.btn.is-busy.btn-ai {
+  border-color: var(--merged);
+  background: var(--merged-subtle);
+  color: var(--merged);
+}
+
+.btn.is-busy.btn-danger:not(.btn-danger-solid) {
+  border-color: var(--danger);
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.btn.is-busy .spinner {
+  width: 13px;
+  height: 13px;
+}
+
+/* Without motion the indicators stay visible as still marks. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    border-color: color-mix(in srgb, currentColor 45%, transparent);
+    border-top-color: currentColor;
+  }
+
+  .thinking-dots i {
+    opacity: 0.7;
+  }
+
+  .progress-strip::after {
+    width: 100%;
+    opacity: 0.45;
+  }
+
+  .status-strip {
+    background-size: 100% 100%;
+  }
+}
+
 .noscript {
   padding: 24px;
 }
@@ -688,7 +889,13 @@ body.drawer-open .search-banner {
   padding-right: calc(var(--drawer-eff) + 16px);
 }
 
-.search-banner > .icon {
+.search-banner {
+  position: relative;
+}
+
+.search-banner > .icon,
+.search-banner > .spinner,
+.search-banner > .progress-strip {
   color: var(--merged);
 }
 
@@ -1513,6 +1720,27 @@ body.is-resizing .drawer {
   flex: none;
 }
 
+/* The switch between side drawer and full workspace is the one header
+   action that changes the whole layout, so it reads as a labelled, tinted
+   button rather than one more ghost icon. */
+.btn-expand,
+.btn-collapse {
+  gap: 7px;
+  padding: 0 12px;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.btn-expand:hover:not(:disabled),
+.btn-collapse:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--accent);
+}
+
 /* Agent mark, name and AO session ID of the card. */
 .drawer-session {
   display: inline-flex;
@@ -1758,11 +1986,11 @@ body.is-resizing .drawer {
   padding: 10px 16px;
 }
 
-/* "Back to Board" leads the header of the expanded workspace. */
-.drawer.is-expanded .drawer-close {
+/* "Collapse" leads the header of the expanded workspace: it returns to the
+   side drawer with the card still open. Close stays at the far right. */
+.drawer.is-expanded .drawer-expand {
   order: -1;
   margin-right: 4px;
-  color: var(--text);
 }
 
 .drawer.is-expanded .drawer-body {
@@ -2312,9 +2540,42 @@ details.section[open] > summary .icon {
   color: var(--text-subtle);
 }
 
+/* Unlink and Delete Session show their labels where there is room (the
+   expanded workspace) and fall back to icons with tooltips in the drawer. */
+@container drawer (max-width: 1100px) {
+  .session-bar .btn-collapsible .btn-label {
+    display: none;
+  }
+
+  .session-bar .btn-collapsible {
+    width: 28px;
+    padding: 0;
+  }
+}
+
 .session-alerts {
   flex: none;
   padding: 0 18px;
+}
+
+.alert > .spinner {
+  margin-top: 3px;
+}
+
+/* An alert that reports an operation in progress, such as a resume. */
+.alert.is-working {
+  position: relative;
+  overflow: hidden;
+  color: var(--accent);
+}
+
+.alert.is-working .alert-title,
+.alert.is-working .alert-detail {
+  color: var(--text);
+}
+
+.alert.is-working .alert-actions {
+  align-items: center;
 }
 
 .session-alerts .alert {
@@ -2448,12 +2709,52 @@ details.section[open] > summary .icon {
   color: var(--warning-text);
 }
 
-.working {
+/* The live row at the end of the conversation while the agent works. */
+.msg-thinking .msg-head .elapsed {
+  margin-left: 2px;
+}
+
+.thinking-body {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 13.5px;
+}
+
+.thinking-label {
+  flex: none;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.thinking-detail {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-muted);
-  font-size: 13px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-stop {
+  margin-left: auto;
+  height: 24px;
+}
+
+/* Summary section while the AI writes a new summary. */
+.summary-progress {
+  margin-bottom: 8px;
+}
+
+.panel.is-updating .summary-text {
+  opacity: 0.55;
 }
 
 .jump-latest {
@@ -2751,6 +3052,67 @@ details.section[open] > summary .icon {
   width: min(470px, 100%);
 }
 
+.modal.modal-xwide {
+  width: min(1280px, 100%);
+}
+
+.modal.modal-medium {
+  width: min(620px, 100%);
+}
+
+/* Dialogs that run their action show a failure in place. */
+.dialog-error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: var(--radius);
+  background: var(--danger-subtle);
+}
+
+.modal-text.hint {
+  color: var(--text-subtle);
+}
+
+/* What each way of deleting a card does. */
+.choice-list {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.choice-list dt {
+  font-weight: 600;
+}
+
+.choice-list dt:not(:first-child) {
+  margin-top: 8px;
+}
+
+.choice-list dd {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.btn-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
 @keyframes modal-in {
   from {
     transform: translateY(8px) scale(0.99);
@@ -2898,6 +3260,32 @@ details.section[open] > summary .icon {
 
 /* Import modal */
 
+.import-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.import-search .search {
+  flex: 1 1 auto;
+  height: 38px;
+  padding: 0 6px 0 11px;
+}
+
+.import-search .search input {
+  font-size: 14.5px;
+}
+
+.import-search .btn-ai {
+  height: 38px;
+  padding: 0 14px;
+  font-weight: 600;
+}
+
+.import-hint {
+  margin: 6px 0 10px;
+}
+
 .import-toolbar {
   display: flex;
   align-items: center;
@@ -2906,8 +3294,55 @@ details.section[open] > summary .icon {
   margin-bottom: 10px;
 }
 
-.import-toolbar .search {
-  flex: 1 1 220px;
+.import-toolbar .toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Result of an AI search over the history, or its progress. */
+.import-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  margin-bottom: 10px;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--merged) 30%, transparent);
+  border-radius: var(--radius);
+  background: var(--merged-subtle);
+  font-size: 13.5px;
+}
+
+.import-banner > .icon {
+  color: var(--merged);
+}
+
+.import-banner .banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.import-banner .query {
+  font-weight: 600;
+}
+
+.import-banner.is-running {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.import-banner.is-running .status-strip {
+  flex: 1;
+}
+
+.import-banner.is-error {
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: var(--danger-subtle);
+}
+
+.import-banner.is-error > .icon {
+  color: var(--danger);
 }
 
 .import-list {
@@ -2915,14 +3350,22 @@ details.section[open] > summary .icon {
   border-radius: var(--radius);
   background: var(--bg);
   overflow: hidden;
+  transition: opacity 0.15s var(--ease);
+}
+
+/* The list that an AI search is about to replace. */
+.import-list.is-stale {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .import-row {
   display: grid;
-  grid-template-columns: 18px 84px minmax(0, 1fr) 176px 54px 92px;
+  grid-template-columns: 18px 92px minmax(0, 1fr) 150px 150px 46px 84px 92px;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  min-height: 44px;
+  padding: 7px 12px;
   border-bottom: 1px solid var(--border-muted);
   cursor: pointer;
 }
@@ -2936,6 +3379,7 @@ details.section[open] > summary .icon {
 }
 
 .import-row.is-head {
+  min-height: 0;
   color: var(--text-subtle);
   font-size: 11.5px;
   font-weight: 600;
@@ -2947,7 +3391,10 @@ details.section[open] > summary .icon {
 
 .import-row.is-imported {
   cursor: default;
-  color: var(--text-subtle);
+}
+
+.import-row.is-imported .import-title {
+  color: var(--text-muted);
 }
 
 .import-row.is-imported:hover {
@@ -2959,14 +3406,97 @@ details.section[open] > summary .icon {
   accent-color: var(--accent-emphasis);
 }
 
+.import-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.import-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .import-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.import-preview,
+.import-reason {
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-reason {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+}
+
+.import-reason > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.import-reason.is-ai {
+  color: var(--merged);
+}
+
+.import-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* Native session ID (click to copy) and AO session ID of a history row. */
+.id-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  height: 20px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background: var(--neutral-subtle);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.id-chip {
+  cursor: copy;
+}
+
+button.id-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.id-chip.is-ao {
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  background: var(--success-subtle);
+  color: var(--success);
+}
+
 .import-scope {
   color: var(--text-subtle);
+  font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2984,8 +3514,26 @@ details.section[open] > summary .icon {
   white-space: nowrap;
 }
 
+.import-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.import-action .btn {
+  height: 26px;
+}
+
+.import-done {
+  color: var(--text-subtle);
+  font-size: 12.5px;
+}
+
 .import-state {
-  padding: 28px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px 12px;
   color: var(--text-subtle);
   text-align: center;
 }

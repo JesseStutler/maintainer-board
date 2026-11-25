@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -654,21 +655,159 @@ func (s *Server) handleMoveCard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.view(card))
 }
 
+// deleteAOSession kills an AO session and permanently removes it from AO,
+// then forgets everything the board kept about it. It is detached from the
+// request: a kill without the delete that follows it would leave the
+// session terminated but still listed.
+func (s *Server) deleteAOSession(ctx context.Context, sessionID string) error {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if err := s.ao.DeleteSession(dctx, sessionID, true); err != nil {
+		// The kill may have gone through; show the new state soon.
+		s.requestAOSync()
+		return err
+	}
+	s.mu.Lock()
+	if _, ok := s.sessions[sessionID]; ok {
+		delete(s.sessions, sessionID)
+		s.sessionOrder = slices.DeleteFunc(s.sessionOrder, func(id string) bool { return id == sessionID })
+	}
+	s.mu.Unlock()
+	s.index.mu.Lock()
+	delete(s.index.seen, sessionID)
+	s.index.mu.Unlock()
+	// The session is gone for good: drop its conversation index and the
+	// mark that kept it off the board.
+	if err := s.store.DeleteContent(dctx, sessionID); err != nil {
+		s.log.Warn("delete session: content index not cleared", "session", sessionID, "err", err)
+	}
+	_ = s.store.UnignoreSession(dctx, sessionID)
+	s.forgetImportCandidates()
+	s.requestAOSync()
+	return nil
+}
+
+// writeSessionDeleteError reports that AO did not delete a session, with
+// AO's reason, and says that the board was left as it was.
+func (s *Server) writeSessionDeleteError(w http.ResponseWriter, sessionID string, err error) {
+	s.log.Warn("ao session delete failed", "session", sessionID, "err", err)
+	status, code, msg := s.aoErrorResponse(err)
+	msg = strings.TrimRight(msg, ". ") + "."
+	writeError(w, status, code, fmt.Sprintf("AO did not delete session %s: %s Nothing was removed from the board.", sessionID, msg))
+}
+
+func queryBool(r *http.Request, name string) bool {
+	v, err := strconv.ParseBool(r.URL.Query().Get(name))
+	return err == nil && v
+}
+
+// handleDeleteCard removes a card. With deleteAoSession=true (query
+// parameter or JSON body) the linked AO session is killed and deleted from
+// AO first; if AO refuses, nothing is removed. Without it the session stays
+// in AO and is remembered as dismissed, so that the AO sync does not give
+// it a new card.
 func (s *Server) handleDeleteCard(w http.ResponseWriter, r *http.Request) {
-	card, err := s.store.DeleteCard(r.Context(), r.PathValue("id"))
+	ctx := r.Context()
+	id := r.PathValue("id")
+	var req struct {
+		DeleteAOSession bool `json:"deleteAoSession"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	deleteSession := req.DeleteAOSession || queryBool(r, "deleteAoSession")
+	card, err := s.store.GetCard(ctx, id)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	if card.AOSessionID != "" {
-		// Keep AO sync from recreating a card for the same session.
-		_ = s.store.IgnoreSession(r.Context(), card.AOSessionID)
+	sessionID := card.AOSessionID
+	sessionDeleted := false
+	if deleteSession && sessionID != "" {
+		if err := s.deleteAOSession(ctx, sessionID); err != nil {
+			s.writeSessionDeleteError(w, sessionID, err)
+			return
+		}
+		sessionDeleted = true
+	}
+	if _, err := s.store.DeleteCard(context.WithoutCancel(ctx), id); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if sessionID != "" && !sessionDeleted {
+		// Keep AO sync from recreating a card for the session that stays.
+		_ = s.store.IgnoreSession(context.WithoutCancel(ctx), sessionID)
 	}
 	s.mu.Lock()
-	delete(s.summaryStamp, card.ID)
+	delete(s.summaryStamp, id)
 	s.mu.Unlock()
 	s.hub.Publish()
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": card.ID})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "aoSessionId": sessionID, "aoSessionDeleted": sessionDeleted})
+}
+
+// handleDeleteCardSession kills the AO session of a card, deletes it from
+// AO and detaches it. The card itself, with its notes and GitHub link,
+// stays on the board.
+func (s *Server) handleDeleteCardSession(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	card, err := s.store.GetCard(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	sessionID := card.AOSessionID
+	if sessionID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION", "This card has no agent session.")
+		return
+	}
+	if err := s.deleteAOSession(ctx, sessionID); err != nil {
+		s.writeSessionDeleteError(w, sessionID, err)
+		return
+	}
+	updated, err := s.store.UpdateCard(context.WithoutCancel(ctx), id, func(c *db.Card, m *db.Mutation) error {
+		if c.AOSessionID != sessionID {
+			return nil
+		}
+		c.AOSessionID, c.AOTitle = "", ""
+		m.Event(db.EventSession, "Deleted AO session "+sessionID+" from Agent Orchestrator")
+		return nil
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.hub.Publish()
+	writeJSON(w, http.StatusOK, map[string]any{"card": s.view(updated), "aoSessionId": sessionID, "aoSessionDeleted": true})
+}
+
+// handleUnlinkSession detaches the AO session from a card and nothing
+// else: the session stays in AO untouched, and is remembered as dismissed
+// so that the AO sync does not create a second card for it. Linking or
+// importing it again lifts that.
+func (s *Server) handleUnlinkSession(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	sessionID := ""
+	updated, err := s.store.UpdateCard(ctx, r.PathValue("id"), func(c *db.Card, m *db.Mutation) error {
+		sessionID = c.AOSessionID
+		if sessionID == "" {
+			return nil
+		}
+		c.AOSessionID, c.AOTitle = "", ""
+		m.Event(db.EventSession, "Unlinked AO session "+sessionID)
+		return nil
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if sessionID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION", "This card has no agent session.")
+		return
+	}
+	_ = s.store.IgnoreSession(ctx, sessionID)
+	s.hub.Publish()
+	writeJSON(w, http.StatusOK, map[string]any{"card": s.view(updated), "aoSessionId": sessionID})
 }
 
 func (s *Server) handleCardEvents(w http.ResponseWriter, r *http.Request) {
