@@ -112,6 +112,13 @@ func TestSpawnSendsTheSpawnRequest(t *testing.T) {
 	}
 	jsonEqual(t, (*calls)[0].Body, `{"projectId":"volcano","harness":"copilot","mode":"chat","kind":"worker","displayName":"Fix flaky e2e","displayNameExplicit":true,"prompt":"start"}`)
 
+	// A chosen model and effort travel with the request; without them the
+	// fields are left out so AO applies its defaults (asserted above).
+	if _, err := c.Spawn(context.Background(), SpawnRequest{ProjectID: "volcano", Harness: "codex", Mode: "chat", Kind: "worker", Model: "gpt-6.2-sol", Effort: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	jsonEqual(t, (*calls)[1].Body, `{"projectId":"volcano","harness":"codex","mode":"chat","kind":"worker","model":"gpt-6.2-sol","effort":"high"}`)
+
 	c, _ = fakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
 		"POST /api/v1/sessions": respond(201, `{}`),
 	})
@@ -216,6 +223,122 @@ func TestSendInterruptKillRenameImport(t *testing.T) {
 	wantResults := []ImportResult{{ID: "422e", Status: "created", SessionID: "standalone-2"}, {ID: "bad", Status: "failed", Error: "unreadable"}}
 	if !reflect.DeepEqual(results, wantResults) {
 		t.Fatalf("results = %+v", results)
+	}
+}
+
+// Payloads shaped like the live daemon's, including fields the board ignores.
+const agentModelsJSON = `{
+  "agentId": "codex", "selectionMode": "list", "allowCustom": false, "source": "cli", "stale": false,
+  "models": [
+    {"id": "gpt-6.2-astra", "label": "GPT-6.2-Astra", "efforts": ["low", "medium", "high"], "defaultEffort": "low"},
+    {"id": "gpt-6.2-sol", "label": "GPT-6.2-Sol", "isDefault": true, "efforts": ["low", "medium", "high", "xhigh"], "defaultEffort": "medium"},
+    {"id": "plain-model", "label": "plain-model"}
+  ]
+}`
+
+const conversationModelsJSON = `{
+  "models": [
+    {"id": "gpt-6.2-sol", "displayName": "GPT-6.2-Sol", "description": "Fast, go-to model.", "default": true,
+     "efforts": ["low", "medium", "high"], "defaultEffort": "low", "supportsFast": true}
+  ],
+  "selected": {"model": "gpt-6.2-sol", "reasoningEffort": "high", "approvalMode": "on-request", "fastMode": false, "planMode": false}
+}`
+
+func TestAgentModels(t *testing.T) {
+	c, calls := fakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api/v1/agents/codex/models":   respond(200, agentModelsJSON),
+		"GET /api/v1/agents/copilot/models": respond(200, `{"agentId": "copilot"}`),
+		"GET /api/v1/agents/nope/models":    respond(404, `{"error":"not_found","code":"AGENT_NOT_FOUND","message":"Unknown agent adapter"}`),
+	})
+	got, err := c.AgentModels(context.Background(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &AgentModels{AgentID: "codex", Models: []AgentModel{
+		{ID: "gpt-6.2-astra", Label: "GPT-6.2-Astra", Efforts: []string{"low", "medium", "high"}, DefaultEffort: "low"},
+		{ID: "gpt-6.2-sol", Label: "GPT-6.2-Sol", IsDefault: true, Efforts: []string{"low", "medium", "high", "xhigh"}, DefaultEffort: "medium"},
+		{ID: "plain-model", Label: "plain-model"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentModels = %+v, want %+v", got, want)
+	}
+	if call := (*calls)[0]; call.Method != "GET" || call.Path != "/api/v1/agents/codex/models" || call.Body != "" {
+		t.Fatalf("request = %+v", call)
+	}
+	// A catalog without models is an empty list, never nil.
+	if got, err := c.AgentModels(context.Background(), "copilot"); err != nil || got.Models == nil || len(got.Models) != 0 {
+		t.Fatalf("empty catalog = %+v, %v", got, err)
+	}
+	var apiErr *APIError
+	if _, err := c.AgentModels(context.Background(), "nope"); !errors.As(err, &apiErr) || apiErr.Code != "AGENT_NOT_FOUND" || apiErr.Status != 404 {
+		t.Fatalf("unknown agent: err = %v", err)
+	}
+	// The agent name cannot break out of its path segment.
+	if _, err := c.AgentModels(context.Background(), "a/b"); err == nil || (*calls)[len(*calls)-1].Escaped != "/api/v1/agents/a%2Fb/models" {
+		t.Fatalf("escaped path = %q, err %v", (*calls)[len(*calls)-1].Escaped, err)
+	}
+}
+
+func TestConversationModels(t *testing.T) {
+	c, calls := fakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api/v1/sessions/standalone-1/conversation/models": respond(200, conversationModelsJSON),
+		// An imported session that was not resumed: no models, nothing selected.
+		"GET /api/v1/sessions/volcano-2/conversation/models": respond(200, `{"models": [], "selected": {}}`),
+	})
+	got, err := c.ConversationModels(context.Background(), "standalone-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &ConversationModels{
+		Models: []ConversationModel{{ID: "gpt-6.2-sol", DisplayName: "GPT-6.2-Sol", Description: "Fast, go-to model.", Default: true,
+			Efforts: []string{"low", "medium", "high"}, DefaultEffort: "low"}},
+		Selected: ConversationSettings{Model: "gpt-6.2-sol", ReasoningEffort: "high", ApprovalMode: "on-request"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ConversationModels = %+v, want %+v", got, want)
+	}
+	if (*calls)[0].Method != "GET" {
+		t.Fatalf("request = %+v", (*calls)[0])
+	}
+	sleeping, err := c.ConversationModels(context.Background(), "volcano-2")
+	if err != nil || sleeping.Models == nil || len(sleeping.Models) != 0 || sleeping.Selected != (ConversationSettings{}) {
+		t.Fatalf("sleeping session = %+v, %v", sleeping, err)
+	}
+	var apiErr *APIError
+	if _, err := c.ConversationModels(context.Background(), "gone"); !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Fatalf("missing session: err = %v", err)
+	}
+}
+
+func TestUpdateConversationSettings(t *testing.T) {
+	c, calls := fakeDaemon(t, map[string]func(http.ResponseWriter, *http.Request){
+		"PATCH /api/v1/sessions/standalone-1/conversation/settings": respond(200, `{"model": "gpt-6.2-astra", "reasoningEffort": "high", "fastMode": false}`),
+		"PATCH /api/v1/sessions/volcano-2/conversation/settings":    respond(200, `{}`),
+		"PATCH /api/v1/sessions/busy/conversation/settings":         respond(409, `{"error":"conflict","code":"SESSION_BUSY","message":"session is busy"}`),
+	})
+	model, effort, none := "gpt-6.2-astra", "high", ""
+	got, err := c.UpdateConversationSettings(context.Background(), "standalone-1", ConversationTurnSettings{Model: &model, ReasoningEffort: &effort})
+	if err != nil || *got != (ConversationSettings{Model: "gpt-6.2-astra", ReasoningEffort: "high"}) {
+		t.Fatalf("UpdateConversationSettings = %+v, %v", got, err)
+	}
+	call := (*calls)[0]
+	if call.Method != "PATCH" || call.Path != "/api/v1/sessions/standalone-1/conversation/settings" {
+		t.Fatalf("request = %+v", call)
+	}
+	// Only the fields that change are sent.
+	jsonEqual(t, call.Body, `{"model":"gpt-6.2-astra","reasoningEffort":"high"}`)
+
+	// An empty string is sent as such: it resets the field to the default.
+	// A field that is not set is left out, so AO keeps its value.
+	got, err = c.UpdateConversationSettings(context.Background(), "volcano-2", ConversationTurnSettings{Model: &none})
+	if err != nil || *got != (ConversationSettings{}) {
+		t.Fatalf("reset = %+v, %v", got, err)
+	}
+	jsonEqual(t, (*calls)[1].Body, `{"model":""}`)
+
+	var apiErr *APIError
+	if _, err := c.UpdateConversationSettings(context.Background(), "busy", ConversationTurnSettings{Model: &model}); !errors.As(err, &apiErr) || apiErr.Code != "SESSION_BUSY" {
+		t.Fatalf("busy session: err = %v", err)
 	}
 }
 

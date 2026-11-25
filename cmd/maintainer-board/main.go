@@ -52,6 +52,8 @@ func run() error {
 		syncInterval   = flag.Duration("sync-interval", 120*time.Second, "GitHub background sync interval")
 		aoSyncInterval = flag.Duration("ao-sync-interval", 5*time.Second, "AO session sync interval")
 		ghPath         = flag.String("gh-path", "gh", "path of the gh CLI")
+		ghUser         = flag.String("gh-user", "", "your GitHub login, for author and review status (default: the account gh is logged in as)")
+		summaryModel   = flag.String("summary-model", summary.DefaultSummaryModel, "Copilot CLI model for Summarize with AI; empty uses the CLI default (copilot's default model and codex remain as fallbacks)")
 		ciIgnore       = flag.String("ci-ignore-contexts", "tide", "comma-separated status contexts and check names ignored in the CI rollup")
 		prowLabels     = flag.Bool("prow-approval-labels", true, "treat the lgtm + approved label pair as an approval")
 		allowedHosts   = flag.String("allowed-hosts", "", "comma-separated extra Host header values to accept besides loopback")
@@ -67,6 +69,9 @@ func run() error {
 
 	if !github.ValidRepo(*defaultRepo) {
 		return fmt.Errorf("invalid --default-repo %q: expected owner/name", *defaultRepo)
+	}
+	if m := strings.TrimSpace(*summaryModel); m != "" && !summary.ValidModel(m) {
+		return fmt.Errorf("invalid --summary-model %q: expected a model name such as %s", *summaryModel, summary.DefaultSummaryModel)
 	}
 	if *syncInterval < 10*time.Second {
 		return errors.New("--sync-interval must be at least 10s")
@@ -88,7 +93,23 @@ func run() error {
 		gh.IgnoreContexts[name] = true
 	}
 
+	if *ghUser != "" {
+		if !github.ValidLogin(strings.TrimPrefix(strings.TrimSpace(*ghUser), "@")) {
+			return fmt.Errorf("invalid --gh-user %q: expected a GitHub login", *ghUser)
+		}
+		gh.SetUser(*ghUser)
+	} else {
+		// Not fatal: offline or logged out, the board works without knowing
+		// who "you" are and asks again before every GitHub sync.
+		detectCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if _, err := gh.DetectUser(detectCtx); err != nil {
+			logger.Warn("could not detect the GitHub user; personal review status stays empty until gh answers (or pass --gh-user)", "err", err)
+		}
+		cancel()
+	}
+
 	ai := summary.NewAI(filepath.Join(filepath.Dir(*dbPath), "summarizer"))
+	ai.SummaryModel = strings.TrimSpace(*summaryModel)
 
 	srv := server.New(server.Config{
 		DefaultRepo:        *defaultRepo,
@@ -115,7 +136,7 @@ func run() error {
 	}
 
 	srv.Start(ctx)
-	logger.Info("maintainer-board listening", "url", "http://"+listener.Addr().String(), "db", *dbPath, "ao", *aoURL, "repo", *defaultRepo)
+	logger.Info("maintainer-board listening", "url", "http://"+listener.Addr().String(), "db", *dbPath, "ao", *aoURL, "repo", *defaultRepo, "user", gh.User())
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()

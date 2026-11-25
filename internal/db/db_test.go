@@ -2,9 +2,11 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -95,6 +97,152 @@ func TestReopenKeepsDataAndDoesNotReseed(t *testing.T) {
 	got, err := s.GetCard(ctx, card.ID)
 	if err != nil || got.Title != "persisted" || !reflect.DeepEqual(got.Tags, StringList{"a"}) {
 		t.Fatalf("card after reopen = %+v, err %v", got, err)
+	}
+}
+
+// writeV1Database creates a database exactly as the first release left it:
+// schema version 1, one card with GitHub tracking state, one timeline event.
+func writeV1Database(t *testing.T, path string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, stmt := range []string{
+		migrations[0],
+		`PRAGMA user_version = 1`,
+		`INSERT INTO cards (id, title, column_id, category, tags, ao_session_id, gh_repo, gh_kind, gh_number, gh_author,
+			gh_state, gh_review_decision, ack_at, unread_updates, has_unread_updates, created_at, updated_at)
+		 VALUES ('c_old', 'Review CSI limits', 'waiting', 'PR_REVIEW', '["scheduler"]', 'standalone-1', 'volcano-sh/volcano', 'pr', 6247, 'mohit',
+			'OPEN', 'REVIEW_REQUIRED', '2026-11-24T14:05:08Z', 2, 1, '2026-11-24T14:05:06Z', '2026-11-24T14:05:08Z')`,
+		`INSERT INTO card_events (card_id, kind, message, created_at) VALUES ('c_old', 'created', 'Card created in Waiting', '2026-11-24T14:05:06Z')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("prepare v1 database: %v", err)
+		}
+	}
+}
+
+func cardColumnNames(t *testing.T, s *Store) map[string]bool {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('cards')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	names := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names[name] = true
+	}
+	return names
+}
+
+func TestMigrationAddsReviewColumnsToExistingDatabase(t *testing.T) {
+	ctx := context.Background()
+	check := func(t *testing.T, path string) {
+		t.Helper()
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("open a version 1 database: %v", err)
+		}
+		defer s.Close()
+		var version int
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != len(migrations) {
+			t.Fatalf("user_version = %d, err %v, want %d", version, err, len(migrations))
+		}
+		names := cardColumnNames(t, s)
+		for _, col := range []string{"gh_my_review_state", "gh_my_reviewed_at", "gh_is_stale_review"} {
+			if !names[col] {
+				t.Errorf("cards.%s is missing after migration", col)
+			}
+		}
+		// The existing row survives untouched and reads the new fields as
+		// their defaults.
+		got, err := s.GetCard(ctx, "c_old")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Title != "Review CSI limits" || got.ColumnID != "waiting" || got.AOSessionID != "standalone-1" || got.GHNumber != 6247 ||
+			got.GHAuthor != "mohit" || got.GHReviewDecision != "REVIEW_REQUIRED" || !got.HasUnreadUpdates || got.UnreadUpdates != 2 ||
+			!reflect.DeepEqual(got.Tags, StringList{"scheduler"}) {
+			t.Fatalf("existing card changed during migration: %+v", got)
+		}
+		if got.GHMyReviewState != "" || got.GHMyReviewedAt != "" || got.GHIsStaleReview {
+			t.Fatalf("new fields are not empty on an existing card: %q %q %v", got.GHMyReviewState, got.GHMyReviewedAt, got.GHIsStaleReview)
+		}
+		if events, err := s.ListEvents(ctx, "c_old", 0); err != nil || len(events) != 1 {
+			t.Fatalf("timeline after migration = %v, err %v", events, err)
+		}
+		if cols, _ := s.ListColumns(ctx); len(cols) != 6 {
+			t.Fatalf("migration re-seeded or dropped columns: %d", len(cols))
+		}
+		// The conversation index of the same upgrade is usable too.
+		if err := s.IndexContent(ctx, "standalone-1", []ContentMessage{{MessageID: "m1", Sequence: 1, Role: "user", Text: "CSI limits"}}, 1, "", false); err != nil {
+			t.Fatalf("content index after migration: %v", err)
+		}
+		if hits, err := s.ContentHits(ctx, "csi"); err != nil || len(hits) != 1 {
+			t.Fatalf("content hits after migration = %v, %v", hits, err)
+		}
+		// The migrated row accepts the new fields.
+		if _, err := s.UpdateCard(ctx, "c_old", func(c *Card, m *Mutation) error {
+			c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = "APPROVED", "2026-11-24T13:15:12Z", true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := s.GetCard(ctx, "c_old"); got.GHMyReviewState != "APPROVED" || !got.GHIsStaleReview {
+			t.Fatalf("new fields did not persist: %+v", got)
+		}
+	}
+
+	t.Run("version 1 database", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "board.db")
+		writeV1Database(t, path)
+		check(t, path)
+		// Opening again is a no-op: nothing is added twice, data stays.
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("second open: %v", err)
+		}
+		defer s.Close()
+		if got, err := s.GetCard(ctx, "c_old"); err != nil || got.GHMyReviewState != "APPROVED" {
+			t.Fatalf("card after second open = %+v, err %v", got, err)
+		}
+	})
+
+	// A column that already exists (an interrupted or hand-applied upgrade)
+	// must not make the migration fail.
+	t.Run("column already present", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "board.db")
+		writeV1Database(t, path)
+		raw, err := sql.Open("sqlite", "file:"+path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Exec(`ALTER TABLE cards ADD COLUMN gh_my_review_state TEXT NOT NULL DEFAULT ''`); err != nil {
+			t.Fatal(err)
+		}
+		raw.Close()
+		check(t, path)
+	})
+}
+
+func TestFreshDatabaseHasReviewColumns(t *testing.T) {
+	s := newStore(t)
+	names := cardColumnNames(t, s)
+	for _, col := range []string{"gh_my_review_state", "gh_my_reviewed_at", "gh_is_stale_review"} {
+		if !names[col] {
+			t.Errorf("cards.%s is missing in a fresh database", col)
+		}
+	}
+	c := mustCard(t, s, "fresh", "inbox")
+	if c.GHMyReviewState != "" || c.GHIsStaleReview {
+		t.Fatalf("fresh card = %+v", c)
 	}
 }
 
@@ -267,6 +415,7 @@ func TestCardFieldsRoundTrip(t *testing.T) {
 		c.PrevHeadSHA, c.PrevCommitCount, c.PrevCommentCount, c.PrevReviewCommentCount = "prev", 6, 7, 8
 		c.PrevState, c.PrevCIStatus, c.PrevReviewDecision, c.PrevUpdatedAt = "OPEN", "FAILURE", "CHANGES_REQUESTED", "t5"
 		c.UnreadUpdates, c.UpdateCycles, c.UpdateSummary, c.HasUnreadUpdates = 9, 2, "+2 commits", true
+		c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = "LGTM", "t6", true
 		return nil
 	})
 	if err != nil {
@@ -435,5 +584,103 @@ func TestSettingsAndIgnoredSessions(t *testing.T) {
 	_ = s.UnignoreSession(ctx, "volcano-9")
 	if ignored, _ = s.IgnoredSessions(ctx); len(ignored) != 0 {
 		t.Fatalf("ignored after unignore = %v", ignored)
+	}
+}
+
+func TestContentIndex(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if seq, stamp, err := s.ContentState(ctx, "volcano-2"); err != nil || seq != 0 || stamp != "" {
+		t.Fatalf("state of an unknown session = %d %q %v", seq, stamp, err)
+	}
+	msgs := []ContentMessage{
+		{MessageID: "m1", Sequence: 1, Role: "user", Text: "Please review the CSI NodeVolumeLimits removal", CreatedAt: "t1"},
+		{MessageID: "m2", Sequence: 2, Role: "assistant", Text: "The preempt.go victim filter changes eligibility.", CreatedAt: "t2"},
+		{MessageID: "m3", Sequence: 3, Role: "user", Text: "  ", CreatedAt: "t3"},
+		{MessageID: "", Sequence: 4, Role: "user", Text: "no id"},
+	}
+	if err := s.IndexContent(ctx, "volcano-2", msgs, 3, "stamp-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IndexContent(ctx, "volcano-3", []ContentMessage{{MessageID: "x1", Sequence: 1, Role: "user", Text: "CompositePodGroup 设计讨论"}}, 1, "s", false); err != nil {
+		t.Fatal(err)
+	}
+	if seq, stamp, _ := s.ContentState(ctx, "volcano-2"); seq != 3 || stamp != "stamp-1" {
+		t.Fatalf("state = %d %q", seq, stamp)
+	}
+	// Blank messages and messages without an ID are not stored.
+	if sessions, messages, err := s.ContentStats(ctx); err != nil || sessions != 2 || messages != 3 {
+		t.Fatalf("stats = %d sessions, %d messages, %v", sessions, messages, err)
+	}
+
+	// Case-insensitive substring match; the newest matching message is returned.
+	hits, err := s.ContentHits(ctx, "NODEVOLUME")
+	if err != nil || len(hits) != 1 || hits[0].SessionID != "volcano-2" || hits[0].Count != 1 || hits[0].Sequence != 1 || hits[0].Role != "user" {
+		t.Fatalf("hits = %+v, %v", hits, err)
+	}
+	if hits, _ := s.ContentHits(ctx, "e"); len(hits) != 2 || hits[0].SessionID != "volcano-2" || hits[0].Count != 2 || hits[0].Sequence != 2 {
+		t.Fatalf("hits across sessions = %+v", hits)
+	}
+	// Text without word boundaries is found by substring too.
+	if hits, _ := s.ContentHits(ctx, "设计"); len(hits) != 1 || hits[0].SessionID != "volcano-3" {
+		t.Fatalf("CJK hits = %+v", hits)
+	}
+	// LIKE wildcards in the term are plain characters.
+	if hits, _ := s.ContentHits(ctx, "%"); len(hits) != 0 {
+		t.Fatalf("a percent sign matched %+v", hits)
+	}
+	if hits, _ := s.ContentHits(ctx, "  "); hits != nil {
+		t.Fatalf("an empty term matched %+v", hits)
+	}
+
+	// A revised message replaces the stored text instead of adding a row.
+	revised := []ContentMessage{{MessageID: "m2", Sequence: 2, Role: "assistant", Text: "Rewritten answer about quotas."}}
+	if err := s.IndexContent(ctx, "volcano-2", revised, 3, "stamp-2", false); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := s.ContentHits(ctx, "preempt.go"); len(hits) != 0 {
+		t.Fatalf("the old text of a revised message is still indexed: %+v", hits)
+	}
+	if hits, _ := s.ContentHits(ctx, "quotas"); len(hits) != 1 {
+		t.Fatalf("the revised text is not indexed: %+v", hits)
+	}
+
+	// Excerpts: the first user message, then the newest messages in order.
+	more := []ContentMessage{
+		{MessageID: "m5", Sequence: 5, Role: "user", Text: "five"},
+		{MessageID: "m6", Sequence: 6, Role: "assistant", Text: "six"},
+	}
+	if err := s.IndexContent(ctx, "volcano-2", more, 6, "stamp-3", false); err != nil {
+		t.Fatal(err)
+	}
+	excerpts, err := s.ContentExcerpts(ctx, "volcano-2", 2)
+	if err != nil || len(excerpts) != 3 || excerpts[0].MessageID != "m1" || excerpts[1].MessageID != "m5" || excerpts[2].MessageID != "m6" {
+		t.Fatalf("excerpts = %+v, %v", excerpts, err)
+	}
+	if excerpts, _ := s.ContentExcerpts(ctx, "volcano-2", 10); len(excerpts) != 4 || excerpts[0].MessageID != "m1" || excerpts[1].MessageID != "m2" {
+		t.Fatalf("the first message was repeated: %+v", excerpts)
+	}
+
+	// A reset drops what a rolled-back conversation no longer contains.
+	if err := s.IndexContent(ctx, "volcano-2", []ContentMessage{{MessageID: "n1", Sequence: 1, Role: "user", Text: "fresh start"}}, 1, "stamp-4", true); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := s.ContentHits(ctx, "NodeVolumeLimits"); len(hits) != 0 {
+		t.Fatalf("reset kept old messages: %+v", hits)
+	}
+	if sessions, messages, _ := s.ContentStats(ctx); sessions != 2 || messages != 2 {
+		t.Fatalf("stats after reset = %d sessions, %d messages", sessions, messages)
+	}
+
+	// Very long messages are cut, not rejected.
+	long := strings.Repeat("a", MaxIndexedRunes+500) + " needle"
+	if err := s.IndexContent(ctx, "big", []ContentMessage{{MessageID: "b1", Sequence: 1, Role: "assistant", Text: long}}, 1, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := s.ContentHits(ctx, "needle"); len(hits) != 0 {
+		t.Fatalf("text beyond the limit was indexed")
+	}
+	if hits, _ := s.ContentHits(ctx, "aaaa"); len(hits) != 1 || len(hits[0].Text) != MaxIndexedRunes {
+		t.Fatalf("long message hit = %d sessions", len(hits))
 	}
 }

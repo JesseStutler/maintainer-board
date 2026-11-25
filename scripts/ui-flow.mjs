@@ -2,9 +2,13 @@
 // so point it at a scratch instance (separate --db), never at the real board:
 //   node scripts/ui-flow.mjs http://127.0.0.1:3913 [output-dir]
 // It does not start, message, resume or terminate any AO session.
+// Two parts are optional:
+//   MB_FLOW_ISSUE=#6394   an issue of the default repository that someone
+//                         else opened, for the Mark Reviewed steps (needs gh);
+//   MB_AI=1               also run one real AI Search through the local CLI.
 
 import { launch } from './cdp.mjs';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const base = process.argv[2];
@@ -14,6 +18,9 @@ if (!base) {
 }
 const out = resolve(process.argv[3] || 'data/ui-flow');
 mkdirSync(out, { recursive: true });
+rmSync(resolve(out, 'chromium-profile'), { recursive: true, force: true });
+const ISSUE = process.env.MB_FLOW_ISSUE || '#6394';
+const WITH_AI = process.env.MB_AI === '1';
 
 const page = await launch({ userDataDir: resolve(out, 'chromium-profile') });
 let failed = false;
@@ -35,6 +42,18 @@ const clickText = (selector, text) =>
   page.eval(`(() => { const el = Array.from(document.querySelectorAll(${q(selector)})).find((e) => e.textContent.trim().includes(${q(text)})); if (!el) throw new Error('no ' + ${q(selector)} + ' with text ' + ${q(text)}); el.click(); return true; })()`);
 const apiGet = (path) => page.eval(`fetch(${q(path)}).then((r) => r.json())`);
 const cardByTitle = async (title) => (await apiGet('/api/cards')).cards.find((c) => c.title === title);
+const apiSend = (method, path, body) =>
+  page.eval(`fetch(${q(path)}, { method: ${q(method)}, headers: { 'Content-Type': 'application/json' }, body: ${q(JSON.stringify(body || {}))} }).then(async (r) => ({ status: r.status, body: await r.json() }))`);
+/** Clicks the button with this exact label inside the drawer section titled `title`. */
+const clickInSection = (title, label) =>
+  page.eval(`(() => {
+    const section = Array.from(document.querySelectorAll('.drawer .section')).find((s) => s.querySelector('.section-title') && s.querySelector('.section-title').textContent === ${q(title)});
+    if (!section) throw new Error('no section ' + ${q(title)});
+    const button = Array.from(section.querySelectorAll('button')).find((b) => b.textContent.trim() === ${q(label)});
+    if (!button) throw new Error('no button ' + ${q(label)} + ' in ' + ${q(title)});
+    button.click();
+    return true;
+  })()`);
 const center = (selector) =>
   page.eval(`(() => { const el = document.querySelector(${q(selector)}); if (!el) throw new Error('no element ' + ${q(selector)}); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
 
@@ -63,7 +82,7 @@ try {
   });
 
   await step('edit notes with Markdown', async () => {
-    await page.eval(`Array.from(document.querySelectorAll('.drawer .section')).find((s) => s.textContent.includes('Maintainer Notes')).querySelector('button').click()`);
+    await clickInSection('Maintainer Notes', 'Edit');
     await page.waitFor(`document.querySelector('.drawer .section textarea.textarea')`);
     await fill('.drawer .section textarea.textarea', '**bold** note\n\n- item one\n- item two\n\n```go\nfmt.Println("hi")\n```');
     await clickText('.drawer .edit-actions button', 'Save');
@@ -71,7 +90,7 @@ try {
   });
 
   await step('edit the summary manually', async () => {
-    await page.eval(`Array.from(document.querySelectorAll('.drawer .section')).find((s) => s.querySelector('.section-title') && s.querySelector('.section-title').textContent === 'Summary').querySelectorAll('button')[1].click()`);
+    await clickInSection('Summary', 'Edit');
     await page.waitFor(`document.querySelector('.drawer .section textarea.textarea')`);
     await fill('.drawer .section textarea.textarea', 'Manual summary for the flow test.');
     await clickText('.drawer .edit-actions button', 'Save');
@@ -83,6 +102,42 @@ try {
     await page.waitFor(`Array.from(document.querySelectorAll('.column[data-column-id="in_progress"] .card-title')).some((t) => t.textContent === ${q(TITLE)})`);
   });
   await page.screenshot(`${out}/01-manual-card-drawer.png`);
+
+  await step('sections fold to one line and remember it', async () => {
+    const toggle = `Array.from(document.querySelectorAll('.drawer .section')).find((s) => s.querySelector('.section-title') && s.querySelector('.section-title').textContent === 'Maintainer Notes').querySelector('.section-toggle')`;
+    await page.eval(`${toggle}.click()`);
+    await page.waitFor(`${toggle}.getAttribute('aria-expanded') === 'false' && !document.querySelector('.drawer .notes-view')`);
+    const peek = await page.eval(`${toggle}.closest('.section-head').querySelector('.section-peek').textContent`);
+    if (!peek.includes('bold note')) throw new Error(`folded notes preview reads ${peek}`);
+    const stored = await page.eval(`JSON.parse(localStorage.getItem('mb.sectionsCollapsed'))`);
+    if (stored['full.notes'] !== true) throw new Error(`stored state is ${JSON.stringify(stored)}`);
+    await page.eval(`${toggle}.click()`);
+    await page.waitFor(`document.querySelector('.drawer .notes-view strong')`);
+  });
+
+  await step('expanded workspace for a card without a conversation', async () => {
+    await page.click('.drawer-expand');
+    await page.waitFor(`document.querySelector('.drawer.is-expanded')`);
+    await page.sleep(250);
+    const info = await page.eval(`(() => {
+      const d = document.querySelector('.drawer').getBoundingClientRect();
+      const title = document.querySelector('.drawer .title-input').getBoundingClientRect();
+      return { width: d.width, viewport: window.innerWidth, title: title.width, titleCenter: title.left + title.width / 2,
+        controls: Boolean(document.querySelector('.drawer-details .section-controls:not([hidden]) select[aria-label="Column"]')),
+        labels: Array.from(document.querySelectorAll('.controls-panel .control-label')).map((e) => e.textContent) };
+    })()`);
+    if (info.width !== info.viewport) throw new Error(`workspace is ${info.width}px of ${info.viewport}px`);
+    if (info.title > 920 || Math.abs(info.titleCenter - info.viewport / 2) > 12) throw new Error(`details are not a centered reading column: ${JSON.stringify(info)}`);
+    if (!info.controls || info.labels.join(',') !== 'Category,Column') throw new Error(`controls section: ${JSON.stringify(info)}`);
+    await page.screenshot(`${out}/06-workspace-no-chat.png`);
+    // The controls keep working from the rail.
+    await page.eval(`(() => { const sel = document.querySelector('.controls-panel select[aria-label="Category"]'); sel.value = 'DESIGN'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await page.waitFor(`Array.from(document.querySelectorAll('.card')).some((c) => c.querySelector('.card-title').textContent === ${q(TITLE)} && c.querySelector('.badge-cat-DESIGN'))`, 15000, 'category change from the rail');
+    await page.eval(`document.activeElement && document.activeElement.blur()`);
+    await key('Escape');
+    await page.waitFor(`document.querySelector('.drawer') && !document.querySelector('.drawer.is-expanded')`);
+    if (!(await page.eval(`Boolean(document.querySelector('.drawer-top select[aria-label="Column"]'))`))) throw new Error('controls did not return to the header');
+  });
 
   await step('close the drawer', async () => {
     await page.click('.drawer-top button[aria-label="Close"]');
@@ -135,6 +190,95 @@ try {
     await fill('#search', '');
     await page.waitFor(`document.querySelectorAll('.card').length > 1 || !document.querySelector('#card-count').textContent.includes(' of ')`);
   });
+
+  await step('search by AO session ID through the API and the search box', async () => {
+    const session = (await apiGet('/api/cards')).cards.find((c) => c.aoSessionId);
+    if (!session) {
+      console.log('skip  no card with an AO session on this instance');
+      return;
+    }
+    const res = await apiGet(`/api/search?q=${encodeURIComponent(session.aoSessionId)}`);
+    if (!res.matches.some((m) => m.cardId === session.id)) throw new Error(`GET /api/search does not find ${session.aoSessionId}`);
+    await fill('#search', session.aoSessionId);
+    await page.waitFor(`document.querySelector('.card[data-id=${q(session.id)}]')`);
+    await page.click('#btn-search-clear');
+    await page.waitFor(`document.getElementById('search').value === ''`);
+  });
+
+  const created = await apiSend('POST', '/api/cards', { githubRef: ISSUE, columnId: 'inbox' });
+  const issue = created.status === 201 ? created.body.card : null;
+  if (issue && issue.ghKind === 'issue' && issue.ghAuthor && issue.ghAuthor.toLowerCase() !== ((await apiGet('/api/board')).currentUser || '').toLowerCase()) {
+    await step('author shows on the card and in the author filter', async () => {
+      await page.waitFor(`document.querySelector('.card[data-id=${q(issue.id)}] .card-author .login')`);
+      const face = await page.eval(`(() => { const el = document.querySelector('.card[data-id=${q(issue.id)}]'); return { author: el.querySelector('.card-author .login').textContent, ref: el.querySelector('.gh-ref').textContent, state: el.querySelector('.gh-state').textContent, mine: Boolean(el.querySelector('.badge-mine')) }; })()`);
+      if (face.author !== `@${issue.ghAuthor}` || !face.ref.startsWith('Issue #') || face.state !== issue.ghState || face.mine) throw new Error(`card face: ${JSON.stringify(face)}`);
+      await page.waitFor(`Array.from(document.querySelectorAll('#filter-author option')).some((o) => o.value === ${q(issue.ghAuthor)})`);
+      await page.eval(`(() => { const s = document.getElementById('filter-author'); s.value = ${q(issue.ghAuthor)}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await page.waitFor(`document.querySelectorAll('.card').length > 0 && Array.from(document.querySelectorAll('.card')).every((c) => c.querySelector('.card-author .login') && c.querySelector('.card-author .login').textContent === ${q(`@${issue.ghAuthor}`)})`);
+      // The author filter combines with the search box.
+      await fill('#search', 'no-such-text-anywhere');
+      await page.waitFor(`document.querySelectorAll('.card').length === 0`);
+      await fill('#search', '');
+      await page.waitFor(`document.querySelectorAll('.card').length > 0`);
+      const me = (await apiGet('/api/board')).currentUser;
+      if (me) {
+        await page.eval(`(() => { const s = document.getElementById('filter-author'); s.value = '@me'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        await page.waitFor(`!document.querySelector('.card[data-id=${q(issue.id)}]')`);
+      }
+      await page.eval(`(() => { const s = document.getElementById('filter-author'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await page.waitFor(`document.querySelector('.card[data-id=${q(issue.id)}]')`);
+    });
+
+    await step('Mark Reviewed records a review by hand, Clear removes it', async () => {
+      await page.click(`.card[data-id="${issue.id}"]`);
+      await page.waitFor(`document.querySelector('.drawer .gh-review')`);
+      if (await page.eval(`Boolean(document.querySelector('.card[data-id=${q(issue.id)}] .chip[data-review]'))`)) throw new Error('an issue nobody reviewed already has a review chip');
+      await clickInSection('GitHub Tracking', 'Mark Reviewed');
+      await page.waitFor(`document.querySelector('.card[data-id=${q(issue.id)}] .chip[data-review="current"]')`);
+      const chip = await page.eval(`document.querySelector('.card[data-id=${q(issue.id)}] .chip[data-review]').textContent`);
+      const card = await apiGet(`/api/cards/${issue.id}`);
+      if (chip !== 'You: Reviewed' || card.ghMyReviewState !== 'REVIEWED' || !card.ghMyReviewedAt || card.ghIsStaleReview) throw new Error(`chip ${chip}, card ${card.ghMyReviewState} ${card.ghMyReviewedAt}`);
+      await page.waitFor(`document.querySelector('.drawer .gh-review .pill-you')`);
+      await page.sleep(300);
+      await page.screenshot(`${out}/07-marked-reviewed.png`);
+      await clickInSection('GitHub Tracking', 'Clear');
+      await page.waitFor(`!document.querySelector('.card[data-id=${q(issue.id)}] .chip[data-review]')`);
+      if ((await apiGet(`/api/cards/${issue.id}`)).ghMyReviewState !== '') throw new Error('the review mark was not cleared');
+      await page.click('.drawer-top button[aria-label="Close"]');
+      await page.waitFor(`!document.querySelector('.drawer')`);
+    });
+  } else {
+    console.log(`skip  author and Mark Reviewed steps: ${ISSUE} is not an issue by someone else, or GitHub is unreachable (${created.status})`);
+  }
+  if (issue) {
+    await apiSend('DELETE', `/api/cards/${issue.id}`);
+    await page.waitFor(`!document.querySelector('.card[data-id=${q(issue.id)}]')`);
+  }
+
+  if (WITH_AI) {
+    await step('AI Search filters the board and explains each match', async () => {
+      const all = await page.eval(`document.querySelectorAll('.card').length`);
+      await fill('#search', 'the card created by the UI flow test');
+      await page.sleep(200);
+      await page.click('#btn-ai-search');
+      await page.waitFor(`document.querySelector('.search-banner.is-running')`, 5000, 'running banner');
+      if (!(await page.eval(`document.getElementById('btn-ai-search').disabled && Boolean(document.querySelector('#btn-ai-search .spin'))`))) throw new Error('no spinner on the AI Search button while it runs');
+      await page.waitFor(`document.querySelector('.search-banner.is-done, .search-banner.is-error')`, 240000, 'AI search to finish');
+      const banner = await page.eval(`({ cls: document.getElementById('search-banner').className, text: document.querySelector('#search-banner .banner-text').textContent })`);
+      if (!banner.cls.includes('is-done')) throw new Error(banner.text);
+      if (!/^AI Search: \d+ match(es)? for "the card created by the UI flow test"$/.test(banner.text)) throw new Error(`banner reads ${banner.text}`);
+      const shown = await page.eval(`Array.from(document.querySelectorAll('.card')).map((c) => ({ title: c.querySelector('.card-title').textContent, match: c.querySelector('.card-match.is-ai') ? c.querySelector('.card-match.is-ai').textContent : null }))`);
+      if (shown.length === 0 || shown.some((c) => !c.match || !c.match.startsWith('AI Match:'))) throw new Error(`cards shown: ${JSON.stringify(shown)}`);
+      if (!shown.some((c) => c.title === TITLE)) throw new Error(`the test card is not among the matches: ${JSON.stringify(shown)}`);
+      await page.screenshot(`${out}/08-ai-search.png`);
+      await page.eval(`document.querySelector('#search-banner [data-action="clear-ai"]').click()`);
+      await page.waitFor(`document.getElementById('search-banner').hidden && !document.querySelector('.card-match.is-ai')`);
+      await page.click('#btn-search-clear');
+      await page.waitFor(`document.querySelectorAll('.card').length === ${all}`);
+    });
+  } else {
+    console.log('skip  AI Search against the real CLI (set MB_AI=1 to include it)');
+  }
 
   const unread = (await apiGet('/api/cards')).cards.find((c) => c.hasUnreadUpdates);
   if (unread) {

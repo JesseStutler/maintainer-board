@@ -65,6 +65,62 @@ type SpawnRequest struct {
 	DisplayName         string `json:"displayName,omitempty"`
 	DisplayNameExplicit bool   `json:"displayNameExplicit,omitempty"`
 	Prompt              string `json:"prompt,omitempty"`
+	// Model and Effort choose the model and reasoning effort of the new
+	// session; empty means the agent's default.
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
+// AgentModel is one model an agent (copilot or codex) can run.
+type AgentModel struct {
+	ID        string `json:"id"`
+	Label     string `json:"label"`
+	IsDefault bool   `json:"isDefault"`
+	// Efforts lists the reasoning efforts the model accepts; empty when
+	// the model has no such setting.
+	Efforts       []string `json:"efforts"`
+	DefaultEffort string   `json:"defaultEffort"`
+}
+
+// AgentModels is the model catalog of one agent.
+type AgentModels struct {
+	AgentID string       `json:"agentId"`
+	Models  []AgentModel `json:"models"`
+}
+
+// ConversationModel is one model a running session can switch to.
+type ConversationModel struct {
+	ID            string   `json:"id"`
+	DisplayName   string   `json:"displayName"`
+	Description   string   `json:"description"`
+	Default       bool     `json:"default"`
+	Efforts       []string `json:"efforts"`
+	DefaultEffort string   `json:"defaultEffort"`
+}
+
+// ConversationSettings are the per-turn settings of a session as AO
+// reports them. Empty fields mean the agent's default.
+type ConversationSettings struct {
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort"`
+	ApprovalMode    string `json:"approvalMode"`
+}
+
+// ConversationModels is the model picker data of a session. Models is
+// empty for a session whose agent is not running, such as an imported
+// session that was not resumed yet.
+type ConversationModels struct {
+	Models   []ConversationModel  `json:"models"`
+	Selected ConversationSettings `json:"selected"`
+}
+
+// ConversationTurnSettings is a settings change for the next turn of a
+// session. A nil field is left as it is; a pointer to "" resets the field
+// to the agent's default.
+type ConversationTurnSettings struct {
+	Model           *string `json:"model,omitempty"`
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
+	ApprovalMode    *string `json:"approvalMode,omitempty"`
 }
 
 type Message struct {

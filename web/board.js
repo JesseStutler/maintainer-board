@@ -1,7 +1,7 @@
 // Kanban board rendering and drag-and-drop.
 
 import { h, relTime, plural } from './util.js';
-import { icon } from './icons.js';
+import { icon, brandIcon } from './icons.js';
 import { api, cardPath } from './api.js';
 import { toastError } from './ui.js';
 import {
@@ -17,9 +17,12 @@ import {
   activityInfo,
   ghRefLabel,
   ghStateInfo,
-  ghIconName,
   ciInfo,
   reviewInfo,
+  myReviewInfo,
+  isMine,
+  searchMatches,
+  aiSearchActive,
 } from './state.js';
 
 let handlers = { onOpenCard: () => {}, onAddCard: () => {}, onRefresh: () => {} };
@@ -30,15 +33,29 @@ export function initBoard(options) {
   handlers = { ...handlers, ...options };
 }
 
-function sessionBadge(card) {
+/** A compact status chip for the card face. */
+function chip(tone, label, iconName, title) {
+  return h('span', { class: ['chip', tone && `chip-${tone}`], title: title || label }, iconName ? icon(iconName, 12) : null, h('span', null, label));
+}
+
+const CHIP_TONES = { 'is-success': 'success', 'is-danger': 'danger', 'is-warning': 'warning', 'is-merged': 'merged', 'is-you': 'you' };
+
+/**
+ * Agent badge of the card footer: brand mark, agent name and live state.
+ * The AO session ID is deliberately kept off the card face; it is in the
+ * tooltip here and in the header of the card workspace.
+ */
+function agentBadge(card) {
   if (!card.aoSessionId) return null;
   const info = activityInfo(card);
-  const harness = card.session ? harnessLabel(card.session.harness) : 'Agent';
+  const harness = card.session ? card.session.harness : '';
+  const name = card.session ? harnessLabel(harness) : 'Agent';
   return h(
     'span',
-    { class: 'badge badge-harness', title: `${card.aoSessionId}: ${info.label}` },
-    h('span', { class: `state-dot ${info.cls}` }),
-    harness,
+    { class: ['agent', `agent-${harness || 'other'}`], title: `${name} session ${card.aoSessionId}: ${info.label}`, dataset: { harness: harness || 'other' } },
+    brandIcon(harness, 15),
+    h('span', { class: 'agent-name' }, name),
+    h('span', { class: 'agent-state' }, h('span', { class: `state-dot ${info.cls}` }), h('span', null, info.label)),
   );
 }
 
@@ -50,23 +67,78 @@ function cardTime(card) {
   return { at: card.updatedAt, what: 'Card updated' };
 }
 
-function renderCard(card) {
+/** Top row: category, linked pull request or issue with its state, author. */
+function cardTop(card) {
   const top = h('div', { class: 'card-top' }, h('span', { class: `badge badge-cat-${card.category}` }, categoryLabel(card.category)));
   if (card.ghNumber) {
     const info = ghStateInfo(card);
+    const kind = card.ghKind === 'issue' ? 'Issue ' : card.ghKind === 'pr' ? 'PR ' : '';
+    // One pill: what it is and where it stands, for example "PR #6247 | OPEN".
     top.appendChild(
       h(
         'span',
-        { class: `gh-ref state-${card.ghState || 'NONE'}`, title: `${card.ghTitle || 'Not synced yet'} (${info.label})` },
-        icon(ghIconName(card), 12),
-        ghRefLabel(card),
+        { class: `gh-pill state-${card.ghState || 'NONE'}`, title: `${card.ghRepo}#${card.ghNumber}: ${card.ghTitle || 'not synced yet'} (${info.label})` },
+        h('span', { class: 'gh-ref' }, `${kind}${ghRefLabel(card)}`),
+        card.ghState ? h('span', { class: 'gh-state' }, card.ghState) : null,
       ),
     );
   }
-  top.appendChild(h('span', { class: 'spacer' }));
-  const badge = sessionBadge(card);
-  if (badge) top.appendChild(badge);
+  if (card.ghAuthor) {
+    const mine = isMine(card);
+    top.appendChild(
+      h(
+        'span',
+        { class: ['card-author', mine && 'is-mine'], title: mine ? `Opened by you (@${card.ghAuthor})` : `Opened by @${card.ghAuthor}` },
+        h('span', { class: 'login' }, `@${card.ghAuthor}`),
+        mine ? h('span', { class: 'badge badge-mine' }, 'MINE') : null,
+      ),
+    );
+  }
+  return top;
+}
 
+/**
+ * Status strip of a linked card: review decision, the maintainer's own
+ * review, CI, and activity counts. Returns null for cards without a link.
+ */
+function cardStatus(card) {
+  if (!card.ghNumber) return null;
+  const strip = h('div', { class: 'card-status' });
+  if (!card.ghLastSyncedAt) {
+    strip.appendChild(chip(card.ghError ? 'danger' : '', card.ghError ? 'Sync failed' : 'Not synced', card.ghError ? 'x-circle' : 'clock', card.ghError || 'Waiting for the first sync with GitHub'));
+    return strip;
+  }
+  const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
+  const isPR = card.ghKind === 'pr';
+  if (isPR && open) {
+    const review = reviewInfo(card.ghReviewDecision);
+    if (review) strip.appendChild(chip(CHIP_TONES[review.tone], review.short, review.icon, review.title));
+  }
+  const mine = myReviewInfo(card);
+  if (mine) {
+    const node = chip(CHIP_TONES[mine.tone], mine.label, mine.icon, mine.title);
+    node.classList.add('chip-mine');
+    node.dataset.review = mine.kind;
+    strip.appendChild(node);
+  }
+  if (isPR && open) {
+    const ci = ciInfo(card.ghCiStatus);
+    if (ci) strip.appendChild(chip(CHIP_TONES[ci.tone], ci.label, ci.icon, ci.title));
+  }
+  if (card.ghError) strip.appendChild(chip('danger', 'Sync failed', 'x-circle', card.ghError));
+
+  const comments = card.ghCommentCount + card.ghReviewCommentCount;
+  const counts = [];
+  if (isPR) counts.push(plural(card.ghCommitCount, 'commit'));
+  counts.push(plural(comments, 'comment'));
+  const detail = isPR
+    ? `${plural(card.ghCommentCount, 'conversation comment')} and ${plural(card.ghReviewCommentCount, 'review comment')}`
+    : plural(card.ghCommentCount, 'comment');
+  strip.appendChild(h('span', { class: 'card-counts', title: detail }, counts.join(' / ')));
+  return strip;
+}
+
+function renderCard(card) {
   const el = h(
     'article',
     {
@@ -77,7 +149,7 @@ function renderCard(card) {
       'aria-label': card.title,
       dataset: { id: card.id },
     },
-    top,
+    cardTop(card),
     h('h3', { class: 'card-title' }, card.title),
   );
 
@@ -85,37 +157,52 @@ function renderCard(card) {
     el.appendChild(h('p', { class: 'card-summary' }, card.summary.replace(/\s*\n\s*/g, ' ')));
   }
 
-  if (card.hasUnreadUpdates) {
+  // Why the card matches the current search, when the face does not show it.
+  for (const match of searchMatches(card)) {
     el.appendChild(
       h(
         'div',
-        { class: 'card-update', title: 'Unread GitHub activity since you last marked this card caught up' },
-        h('span', { class: 'cycles' }, card.updateCycles > 1 ? `Updated ${card.updateCycles}x` : 'Updated'),
-        h('span', { class: 'text' }, card.updateSummary || 'New activity'),
+        { class: `card-match is-${match.kind}`, title: match.title || `${match.label}: ${match.text}`, dataset: { match: match.kind } },
+        h('span', { class: 'label' }, `${match.label}:`),
+        h('span', { class: 'text' }, match.text),
       ),
     );
   }
 
-  const meta = h('div', { class: 'card-meta' });
-  if (card.ghKind === 'pr' && card.ghState !== 'MERGED' && card.ghState !== 'CLOSED') {
-    const ci = ciInfo(card.ghCiStatus);
-    if (ci) meta.appendChild(h('span', { class: `meta-item ${ci.tone}`, title: ci.label }, icon(ci.icon, 12), 'CI'));
-    const review = reviewInfo(card.ghReviewDecision);
-    if (review && card.ghReviewDecision !== 'REVIEW_REQUIRED') {
-      meta.appendChild(h('span', { class: `meta-item ${review.tone}`, title: review.label }, icon(review.icon, 12), review.label));
-    }
-  } else if (card.ghState === 'MERGED' || card.ghState === 'CLOSED') {
-    const info = ghStateInfo(card);
-    meta.appendChild(h('span', { class: `meta-item ${info.tone}` }, info.label));
+  const status = cardStatus(card);
+  if (status) el.appendChild(status);
+
+  if (card.hasUnreadUpdates) {
+    const times = card.updateCycles > 1 ? `${card.updateCycles} separate times` : 'once';
+    el.appendChild(
+      h(
+        'div',
+        { class: 'card-update', title: `Updated ${times} since you last marked this card caught up` },
+        icon('alert', 13),
+        h('span', { class: 'text' }, card.updateSummary || 'New activity'),
+        card.updateCycles > 1 ? h('span', { class: 'cycles' }, `(${card.updateCycles}x)`) : null,
+      ),
+    );
   }
+
   const tags = card.tags || [];
-  for (const tag of tags.slice(0, 3)) meta.appendChild(h('span', { class: 'tag' }, h('span', null, tag)));
-  if (tags.length > 3) meta.appendChild(h('span', { class: 'tag' }, `+${tags.length - 3}`));
-  meta.appendChild(h('span', { class: 'spacer' }));
-  if (card.aoSessionId) meta.appendChild(h('span', { class: 'mono', title: 'AO session' }, card.aoSessionId));
+  if (tags.length > 0) {
+    const row = h('div', { class: 'card-tags' });
+    for (const tag of tags.slice(0, 4)) row.appendChild(h('span', { class: 'tag' }, h('span', null, tag)));
+    if (tags.length > 4) row.appendChild(h('span', { class: 'tag', title: tags.slice(4).join(', ') }, `+${tags.length - 4}`));
+    el.appendChild(row);
+  }
+
   const time = cardTime(card);
-  meta.appendChild(h('span', { title: `${time.what}: ${new Date(time.at).toLocaleString()}` }, relTime(time.at)));
-  el.appendChild(meta);
+  el.appendChild(
+    h(
+      'div',
+      { class: 'card-foot' },
+      agentBadge(card),
+      h('span', { class: 'spacer' }),
+      h('time', { class: 'card-time', title: `${time.what}: ${new Date(time.at).toLocaleString()}` }, relTime(time.at)),
+    ),
+  );
 
   el.addEventListener('click', () => handlers.onOpenCard(card.id));
   el.addEventListener('keydown', (e) => {
@@ -196,6 +283,8 @@ async function moveCard(cardId, columnId, beforeId) {
 function renderColumn(column) {
   const all = columnCards(column.id);
   const visible = all.filter(matchesFilters);
+  // AI results are shown best match first within each column.
+  if (aiSearchActive()) visible.sort((a, b) => state.ai.matches.get(a.id).rank - state.ai.matches.get(b.id).rank);
   const body = h('div', { class: 'column-body', dataset: { columnId: column.id } });
   if (visible.length === 0) {
     body.appendChild(h('div', { class: 'column-empty' }, all.length > 0 ? 'No cards match the filters' : 'No cards'));

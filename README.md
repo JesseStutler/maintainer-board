@@ -21,9 +21,14 @@ forked or modified.
 - [Quick start](#quick-start)
 - [Access through an SSH tunnel](#access-through-an-ssh-tunnel)
 - [Command line flags](#command-line-flags)
+- [The card face](#the-card-face)
 - [How update tracking works](#how-update-tracking-works)
+- [Your own review status](#your-own-review-status)
+- [Search](#search)
 - [Columns and automation roles](#columns-and-automation-roles)
 - [Agent sessions](#agent-sessions)
+- [The card workspace](#the-card-workspace)
+- [Models](#models)
 - [Summaries](#summaries)
 - [Architecture](#architecture)
 - [HTTP API](#http-api)
@@ -44,10 +49,17 @@ forked or modified.
   drawer also has a column dropdown for keyboard use.
 - Cards carry a category (PR Review, Issue, Dev, Design, Triage), free-form
   tags, a summary, Markdown notes and an audit timeline.
-- Search (title, summary, notes, `#number`, tags, session ID), category and
-  agent filters, `Updates Only`, `Show Done`, `Show Orchestrator`.
-- Dark and light themes. English UI; user content in any language renders with
-  CJK font fallbacks.
+- The card face shows what matters without opening it: the pull request or
+  issue with its state and author, the review decision, your own review, CI,
+  activity counts, the unread delta, and the agent with its live state. See
+  [The card face](#the-card-face).
+- Search across card fields, AO session IDs and the text of session
+  conversations, plus an `AI Search` by meaning. See [Search](#search).
+- Category, agent and author filters (`All Authors`, `Mine`, each author on
+  the board), `Updates Only`, `Show Done`, `Show Orchestrator`. All filters
+  combine.
+- Dark and light themes, sized to be read without browser zoom (14px base).
+  English UI; user content in any language renders with CJK font fallbacks.
 
 **GitHub tracking**
 
@@ -61,6 +73,10 @@ forked or modified.
   with green CI go to **Ready**, merged or closed items go to **Done**.
 - `Mark Caught Up` and `Reviewed -> Waiting` acknowledge the current state in
   one click.
+- Your own review is tracked separately from the overall decision: a card
+  says `You: Approved` or `Re-review needed` instead of a bare
+  `Review Required` after you already looked. See
+  [Your own review status](#your-own-review-status).
 - The browser tab title shows `(N) Maintainer Board` while N cards have unread
   updates. Optional browser notifications (off until you enable them).
 
@@ -68,10 +84,14 @@ forked or modified.
 
 - Every live AO worker session gets a card automatically. A `#number` in the
   session name is linked to the default repository.
-- The drawer shows the conversation (Markdown, code blocks with a copy
-  button, tables), polls while it is open, and lets you send messages, stop a
-  running turn, resume an imported session and terminate a session.
+- The card workspace shows the conversation (Markdown, code blocks with a
+  copy button, tables), polls while it is open, and lets you send messages,
+  stop a running turn, resume an imported session and terminate a session.
+  It is a resizable side drawer that expands to a full-width, two-pane
+  workspace. See [The card workspace](#the-card-workspace).
 - Start a new Copilot or Codex session from any card, or link an existing one.
+- Choose the model and reasoning effort when starting a session, and switch
+  them for a running one. See [Models](#models).
 - Import historical Copilot and Codex sessions through AO, with search and
   filters.
 
@@ -138,10 +158,41 @@ Host linux-host
 | `--sync-interval` | `120s` | GitHub background sync period (minimum 10 s). |
 | `--ao-sync-interval` | `5s` | AO session sync period. AO events trigger an immediate sync in between. |
 | `--gh-path` | `gh` | Path of the `gh` CLI. |
+| `--gh-user` | the account `gh` is logged in as | Your GitHub login, for the `MINE` tag, the `Mine` filter and your own review status. Detected with `gh api user`; when that fails at startup the board runs without it and asks again before every GitHub sync. |
+| `--summary-model` | `gemini-4-neon` | Model the Copilot CLI uses for `Summarize with AI`. Empty uses the CLI's default model. |
 | `--ci-ignore-contexts` | `tide` | Comma-separated status contexts and check names left out of the CI rollup. |
 | `--prow-approval-labels` | `true` | Treat the `lgtm` + `approved` label pair as an approval. |
 | `--allowed-hosts` | none | Extra `Host` header values to accept besides loopback. |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`. |
+
+## The card face
+
+From top to bottom:
+
+1. **Top row**: category badge, then one pill with the linked item and its
+   state (`PR #6247 | OPEN`, `Issue #6100 | CLOSED`), then the author
+   (`@login`). Items you opened carry a `MINE` tag.
+2. **Title** and a two-line **summary**.
+3. **Status strip** (linked cards only):
+   - the review decision of the pull request: `Review Required`, `Approved`
+     or `Changes Req`;
+   - your own review, in teal when it is current (`You: Approved`,
+     `You: LGTM`, `You: Changes Req`, `You: Commented`, `You: Reviewed`), in
+     amber when the item changed afterwards (`Re-review needed`), or a muted
+     `Not reviewed` on an open pull request of somebody else;
+   - CI: `CI Passing`, `CI Failing` or `CI Pending`;
+   - activity counts such as `4 commits / 7 comments`.
+4. **Unread bar**, when there is activity you have not acknowledged:
+   `+2 commits, +1 comment (2x)`, where `(2x)` is the number of separate
+   updates.
+5. **Tags**.
+6. **Footer**: the agent with its brand mark (Copilot or Codex), name and
+   live state (`Working`, `Idle`, `Needs Input`, `Resume needed`), and the
+   time of the last activity.
+
+The AO session ID (`standalone-1`, `volcano-2`) is not printed on the card.
+It is in the tooltip of the agent badge and in the header of the card
+workspace, and it is searchable.
 
 ## How update tracking works
 
@@ -209,6 +260,79 @@ clears `hasUnreadUpdates`, `unreadUpdates`, `updateCycles` and
 `updateSummary`. `Reviewed -> Waiting` does the same and moves the card to
 the column with the Waiting role.
 
+## Your own review status
+
+The review decision GitHub reports is about the pull request as a whole. The
+board also tracks where you stand, in three card fields:
+
+| Field | Meaning |
+| --- | --- |
+| `ghMyReviewState` | `APPROVED`, `LGTM`, `CHANGES_REQUESTED`, `COMMENTED` (read from GitHub), `REVIEWED` (marked on the board), or empty. |
+| `ghMyReviewedAt` | Time of your latest review, Prow command or mark. |
+| `ghIsStaleReview` | True when the item changed after that time. |
+
+How the state is read from GitHub on every sync:
+
+- A submitted review counts as GitHub counts it: your latest `APPROVED` or
+  `CHANGES_REQUESTED` review stays in force until a later one replaces it or
+  it is dismissed; a plain review comment does not cancel an approval.
+- Prow commands count too, in a comment or in a review body, when they stand
+  alone on a line: `/approve` gives `APPROVED`, `/lgtm` gives `LGTM`, and
+  `/lgtm cancel`, `/remove-lgtm`, `/approve cancel` and `/remove-approve`
+  take them back.
+- Any other review activity of yours is `COMMENTED`. Plain conversation
+  comments without a command are not a review.
+- Nothing is recorded on items you opened yourself.
+
+`Mark Reviewed` in the GitHub section of a card (or `Mark Caught Up` when
+there are unread updates) records a review you did without leaving a trace on
+GitHub, for example after reading the change locally, or for an issue. With
+no review on GitHub the state becomes `REVIEWED`; with one, its state is kept
+and only the reference time moves to now. `Clear` removes a `REVIEWED` mark.
+
+The review is **stale** (`Re-review needed`) when, after `ghMyReviewedAt`,
+
+- the head commit moved past the one you reviewed (new commits or a
+  force-push; for a Prow command, a commit dated later), or
+- somebody else commented or submitted a review.
+
+Your own later comments, CI results and comments of bots (accounts ending in
+`-bot`, `-robot` or `[bot]`, `app/...` accounts, and a few known names such as
+`github-actions` and `dependabot`) never make it stale. Merged and closed
+items are never stale.
+
+## Search
+
+The search box filters the board as you type. Every word has to match, in
+any of these places:
+
+- the card itself: title, summary, notes, tags, category, the linked item's
+  title, repository, `#number`, labels and `@author`, the agent name and the
+  session branch;
+- the **AO session ID**, in full or in part. The ID is not printed on the
+  card, so a card found through it shows `Matched ID: volcano-2`;
+- the **text of the session conversation**. A card found that way shows
+  `In chat:` with the passage around the match.
+
+Conversation text is kept in a local index (the `content_index` table). The
+board fills it in the background after each AO sync, fetching only what is
+new, so the search is instant and also covers imported sessions that were
+not resumed. Matching is a case-insensitive substring match, which works for
+Chinese as well. `GET /api/search?q=...` returns the same result with a
+`matchedBy` list (`card`, `sessionId`, `conversation`), a reason and the
+snippet.
+
+**AI Search** (the button next to the search box, or `Ctrl+Enter` in it)
+finds cards by meaning. The board describes every card to the local
+`copilot` CLI (with `codex` as fallback): title, category, linked item,
+author, summary, notes, session ID and a few excerpts of the conversation,
+bounded to about 28,000 characters. The model answers with strict JSON,
+`{"matches": [{"cardId": "...", "reason": "..."}]}`. The board then shows
+only those cards, best match first within each column, each with an
+`AI Match:` line, and a banner `AI Search: 3 matches for "..."` with a
+`Clear` button. The other filters still apply. One AI search runs at a time;
+it takes a few seconds and uses your Copilot or Codex quota.
+
 ## Columns and automation roles
 
 A column has a title, an accent color and an optional role. Roles are how
@@ -247,17 +371,65 @@ column, or to the first remaining column. The last column cannot be deleted.
 - This is the same session AO desktop shows: messages sent from either side
   appear in both.
 
+## The card workspace
+
+Clicking a card opens it in a drawer on the right.
+
+- **Width**: `min(780px, 60vw)` by default, never under 520px or over 92% of
+  the window. Drag the grip on its left edge to resize, use the arrow keys
+  while the grip is focused, or double-click it to restore the default. The
+  width is remembered.
+- **Details above the chat** stay compact: Summary, GitHub Tracking,
+  Maintainer Notes and Timeline each fold to one line with a preview, and
+  `Hide Details` gives the whole height to the conversation. GitHub Tracking
+  opens by itself when there are unread updates or a sync error.
+- **Expand** (the button in the header, or `F`) switches to a full-width
+  workspace: a context rail of 340px on the left (Summary, GitHub status and
+  delta, Notes, Controls, Timeline; `Hide Context` folds it away) and the
+  conversation on the right in a centered reading column of at most 900px,
+  with the message box at the bottom.
+- **Split Board** (or `F`, or `Esc`) returns to the drawer next to the
+  board; `Back to Board` closes the card.
+
+Keyboard: `/` focuses the search, `N` opens the new task dialog, `F` toggles
+the expanded workspace, `Esc` goes back one step (field, workspace, drawer),
+`Ctrl+Enter` sends a message, saves an editor, or starts AI Search from the
+search box.
+
+## Models
+
+- **New session**: choosing Copilot or Codex in `New Task / Session` (or in
+  the Agent Session section of a card) loads that agent's models from AO.
+  `Default` lets the agent choose. Models that support reasoning efforts show
+  an `Effort` select as well.
+- **Running session**: the message box has a `Model` select, and an `Effort`
+  select when the chosen model has efforts. A change applies from the next
+  turn and is confirmed in a toast and in the card timeline; the session bar
+  shows the configured model. `Default` clears the choice.
+- **Session that was not resumed**: AO reports no model list for it, so the
+  board offers the catalog of its agent. The choice is stored and applies
+  once the session is resumed.
+
+AO stores any model name it is given. The board therefore checks the model
+and the effort against the list before it passes a change or a new session
+on, and answers `400 UNKNOWN_MODEL` otherwise. The approval mode of a session
+is not exposed by the board.
+
 ## Summaries
 
 - **AUTO**: extracted from the latest substantial assistant message of the
   session, stripped of Markdown, at most about 180 characters. It costs no
   tokens and refreshes when the session sees new activity.
 - **AI**: `Summarize with AI` sends the recent turns and the linked pull
-  request or issue status to the local `copilot` CLI (`copilot -s
-  --no-ask-user -p ...`, 45 s timeout), falling back to `codex exec`. The
-  result is two lines, `Objective:` and `Status:`. The CLIs run in an empty
-  scratch directory with shell and write tools denied (Copilot) or a
-  read-only sandbox (Codex).
+  request or issue status to the local `copilot` CLI and asks for one or two
+  natural sentences in Simplified Chinese: what the session is working on,
+  and the conclusion or next step so far. Identifiers, `#numbers` and API
+  names are kept as they are. Three attempts are made in order, 45 s each:
+  `copilot --model gemini-4-neon` (change the model with `--summary-model`),
+  `copilot` with its default model, then `codex exec`. The answer is cleaned
+  of Markdown, labels and filler and capped at 180 characters on a sentence
+  boundary. The CLIs run in an empty scratch directory with shell and write
+  tools denied (Copilot) or a read-only sandbox (Codex).
 - **MANUAL**: anything you type. Manual and AI summaries are never
   overwritten by extraction; clearing the summary hands control back to AUTO.
 
@@ -269,7 +441,8 @@ column, or to the first remaining column. The last column cannot be deleted.
      v
  maintainer-board (single Go binary)
      |-- internal/server   HTTP API, embedded UI, sync loops, SSE hub
-     |-- internal/db       SQLite: columns, cards, card_events, settings
+     |-- internal/db       SQLite: columns, cards, card_events, settings,
+     |                     content_index (conversation text for search)
      |-- internal/ao       typed client for the AO daemon API
      |-- internal/github   gh wrapper, update detection, auto-move rules
      |-- internal/summary  summary extraction and the AI summarizer
@@ -277,7 +450,7 @@ column, or to the first remaining column. The last column cannot be deleted.
      |
      |-- HTTP --> AO daemon (http://127.0.0.1:3001)
      |-- exec --> gh (pull requests and issues)
-     '-- exec --> copilot / codex (AI summaries only)
+     '-- exec --> copilot / codex (AI summaries and AI search only)
 ```
 
 Layout:
@@ -293,21 +466,27 @@ web/                           the single-page UI
 scripts/                       optional browser tests (headless Chromium)
 ```
 
-State lives in one SQLite file (`modernc.org/sqlite`, no cgo). The UI keeps
-only view preferences (theme, filters, drawer width, notification toggle) in
-`localStorage`.
+State lives in one SQLite file (`modernc.org/sqlite`, no cgo). The schema
+is versioned with `PRAGMA user_version`; a newer binary upgrades an existing
+database in place when it starts, and every migration so far only adds
+columns and tables, so an older binary can still open the file. The UI keeps
+only view preferences (theme, filters, drawer width, folded sections,
+notification toggle) in `localStorage`.
 
 AO endpoints used: `GET/POST /api/v1/sessions`, `PATCH /api/v1/sessions/{id}`,
 `GET /api/v1/sessions/{id}/conversation`,
 `POST .../conversation/messages`, `POST .../conversation/interrupt`,
 `POST .../resume-agent`, `POST .../kill`, `GET /api/v1/projects`,
-`GET/POST /api/v1/session-import`, `GET /api/v1/events`.
+`GET/POST /api/v1/session-import`, `GET /api/v1/events`,
+`GET /api/v1/agents/{agent}/models`,
+`GET /api/v1/sessions/{id}/conversation/models` and
+`PATCH /api/v1/sessions/{id}/conversation/settings`.
 
 `gh` commands used: `gh api repos/{repo}/issues/{n}` (PR or issue),
 `gh pr view {n} --repo {repo} --json ...`, `gh api repos/{repo}/pulls/{n}`
-(exact counts), `gh issue view {n} --repo {repo} --json ...`, and
+(exact counts), `gh issue view {n} --repo {repo} --json ...`,
 `gh api graphql` for unresolved review threads, only for PRs that are
-approved with green CI.
+approved with green CI, and `gh api user` once to learn your login.
 
 ## HTTP API
 
@@ -317,22 +496,28 @@ All bodies are JSON. Errors have the shape
 | Method and path | Purpose |
 | --- | --- |
 | `GET /healthz` | Liveness check. |
-| `GET /api/board` | Columns, cards (with their AO session), AO and GitHub status, settings, unread count. |
+| `GET /api/board` | Columns, cards (with their AO session), AO and GitHub status, settings, unread count, and `currentUser` (your GitHub login, or empty). |
 | `GET /api/events` | Server-sent events; a `board` event after every change. |
 | `PATCH /api/settings` | `{"showOrchestrator": true}` |
 | `GET /api/columns`, `POST /api/columns` | List; create `{"title", "color", "role"}`. |
 | `PATCH /api/columns/{id}`, `DELETE /api/columns/{id}` | Update title, color, role; delete. |
 | `POST /api/columns/reorder` | `{"ids": ["inbox", "..."]}` left to right. |
-| `GET /api/cards`, `POST /api/cards` | List; create `{"title", "category", "columnId", "tags", "notes", "summary", "githubRef", "aoSessionId", "agent": {"harness", "prompt", "projectId"}}`. |
+| `GET /api/cards`, `POST /api/cards` | List; create `{"title", "category", "columnId", "tags", "notes", "summary", "githubRef", "aoSessionId", "agent": {"harness", "prompt", "projectId", "model", "effort"}}`. |
 | `GET /api/cards/{id}`, `PATCH /api/cards/{id}`, `DELETE /api/cards/{id}` | Read; update `title`, `category`, `tags`, `summary`, `notes`, `autoMove`, `columnId`, `aoSessionId`; delete. |
 | `PATCH /api/cards/{id}/move` | `{"columnId", "position"}` (0-based). |
 | `GET /api/cards/{id}/events` | Audit timeline, newest first. |
 | `POST /api/cards/{id}/link-github` | `{"ref": "#6247"}` |
 | `POST /api/cards/{id}/unlink-github` | Remove the link and tracking state. |
 | `POST /api/cards/{id}/sync-github` | Fetch now; returns the card, `newUpdate`, `moved`. |
-| `POST /api/cards/{id}/ack` | Mark caught up; optional `{"moveToColumnId": "waiting"}`. |
+| `POST /api/cards/{id}/ack` | Mark caught up or reviewed; optional `{"moveToColumnId": "waiting"}`. Also records your review (`REVIEWED` when GitHub has none). |
+| `POST /api/cards/{id}/unreview` | Remove a `REVIEWED` mark set on the board. `409 REVIEW_FROM_GITHUB` for a review submitted on GitHub. |
 | `POST /api/cards/{id}/summarize` | AI summary; returns the card, `summary`, `engine`. |
-| `POST /api/cards/{id}/session` | Start an agent session: `{"harness": "copilot" or "codex", "prompt", "projectId"}`. |
+| `POST /api/cards/{id}/session` | Start an agent session: `{"harness": "copilot" or "codex", "prompt", "projectId", "model", "effort"}`. |
+| `GET /api/cards/{id}/models` | Models the card's session can use and the selected `model` and `reasoningEffort`. `source` is `session`, or `agent` when the session is not running and its agent's catalog is returned. |
+| `PATCH /api/cards/{id}/settings` | `{"model", "reasoningEffort"}`, either or both; an empty string resets to the default. Applies from the next turn. |
+| `GET /api/ao/agents/{agent}/models` | Models of `copilot` or `codex`: `{"agent", "models": [{"id", "label", "isDefault", "efforts", "defaultEffort"}]}`. |
+| `GET /api/search?q=...` | Cards matching every word in their fields, session ID or conversation text: `{"matches": [{"cardId", "matchedBy", "reason", "snippet"}]}`. |
+| `POST /api/search/ai` | `{"query"}`; AI search by meaning: `{"engine", "matches": [{"cardId", "reason"}]}`, best match first. `409 AI_SEARCH_BUSY` while another one runs. |
 | `POST /api/github/sync` | Sync every linked card; returns a report. |
 | `GET /api/sessions` | AO sessions with the ID of their card, if any. |
 | `GET /api/sessions/{id}/conversation` | `?limit=60&beforeSequence=N` |
@@ -411,22 +596,31 @@ reachable only by you:
 ```sh
 go vet ./...
 go test -race ./...            # unit and handler tests
-node --test web/tests/         # Markdown parser tests (needs Node 18+, optional)
+node --test web/tests/         # Markdown parser and board logic tests (needs Node 18+, optional)
 ```
 
-The Go tests cover the schema and ordering, reference parsing, the update
-detection and auto-move state machine, the `gh` output parsing, the AO client
-against a fake daemon, every HTTP handler against fake AO and GitHub
-backends, and a guard that keeps emoji out of the repository.
+The Go tests cover the schema, its migrations from an older database and
+ordering, reference parsing, the update detection and auto-move state
+machine, the `gh` output parsing including your own review and Prow
+commands, the conversation index and both searches, the AI prompt, answer
+parsing and engine fallback, the AO client against a fake daemon, every HTTP
+handler against fake AO and GitHub backends, and a guard that keeps emoji
+out of the repository.
 
-Two optional browser tests drive a headless Chromium through the DevTools
+Three optional browser tests drive a headless Chromium through the DevTools
 protocol (no npm packages; set `CHROMIUM` if the binary is not
 `chromium-browser`):
 
 ```sh
-node scripts/ui-smoke.mjs http://127.0.0.1:3012        # read-only walkthrough, screenshots
-node scripts/ui-flow.mjs  http://127.0.0.1:3913        # creates and deletes cards and columns
+node scripts/ui-smoke.mjs  http://127.0.0.1:3012       # read-only walkthrough, screenshots
+node scripts/ui-flow.mjs   http://127.0.0.1:3913       # creates and deletes cards and columns
+node scripts/ui-models.mjs http://127.0.0.1:3916 http://127.0.0.1:3915   # model selection
 ```
+
+`ui-smoke.mjs` only reads: it checks typography, the card faces against the
+API data, the author filter, search by session ID and by conversation text,
+the drawer width and resizing, the expanded workspace, the model pickers and
+both themes. It changes no card, no session and no model.
 
 `ui-flow.mjs` modifies the board, so run it against a scratch instance:
 
@@ -434,7 +628,17 @@ node scripts/ui-flow.mjs  http://127.0.0.1:3913        # creates and deletes car
 ./maintainer-board --addr 127.0.0.1:3913 --db data/scratch/board.db
 ```
 
-Neither script starts, messages, resumes or terminates an AO session.
+Set `MB_AI=1` to include one real AI Search in it. Neither of these two
+scripts starts, messages, resumes or terminates an AO session.
+
+`ui-models.mjs` starts sessions and switches models, so it only runs against
+a board that talks to the bundled stand-in for the AO daemon, never against
+real sessions:
+
+```sh
+node scripts/fake-ao.mjs 3915 &
+./maintainer-board --addr 127.0.0.1:3916 --db data/scratch/models.db --ao-url http://127.0.0.1:3915
+```
 
 ## Troubleshooting
 
@@ -445,7 +649,9 @@ Neither script starts, messages, resumes or terminates an AO session.
 | `403 FORBIDDEN_HOST` | Open the board as `127.0.0.1` or `localhost`, or add the name with `--allowed-hosts`. |
 | A card says `Last sync failed` | `gh auth status`, network access to github.com, and API rate limits. |
 | CI never turns green | A permanently pending status context; add it to `--ci-ignore-contexts`. |
-| `Summarize with AI` fails | `copilot` or `codex` must be on `PATH` and logged in. The error names the CLI that failed. |
+| `Summarize with AI` or `AI Search` fails | `copilot` or `codex` must be on `PATH` and logged in. The error names the CLI that failed. |
+| No `MINE` tag, no `Mine` filter, no `You:` status | The board does not know your login. Check `gh api user`, or start with `--gh-user`. |
+| A search does not find text from a chat | The index follows AO in the background; give a new or long session a few seconds. Messages that are still streaming are indexed once complete. |
 | A deleted card's session should come back | Create a task and choose `Existing Session`, or link it from a card's Agent Session section. |
 | Resume answers "open in another terminal" | Exit the agent in that terminal (or in AO desktop), then resume again. |
 
@@ -455,8 +661,15 @@ Neither script starts, messages, resumes or terminates an AO session.
   AO desktop for those. Plain questions can be answered by sending a message.
 - Review comment counts come from GitHub's totals. An edited comment is not
   detected as new activity.
-- Each `Summarize with AI` run through Copilot is stored by the Copilot CLI
-  as a session of its own. The board hides those runs in its Import History
-  list; other tools will still show them.
+- Each `Summarize with AI` and `AI Search` run through Copilot is stored by
+  the Copilot CLI as a session of its own. The board hides those runs in its
+  Import History list; other tools will still show them.
+- Unread tracking counts all activity, including your own: after you submit
+  a review on GitHub the card shows the new comment as unread until you mark
+  it caught up. Your own review status is not affected by that.
+- Bots are recognized by name, not by account type, when deciding whether a
+  review is stale; an unusual bot name counts as a person.
+- A conversation that AO rolls back is re-indexed from scratch, but a single
+  edited message keeps its old text in the search index until then.
 - One board per database file. There are no user accounts; anyone who can
   reach the port has full access.

@@ -9,11 +9,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
+	"unicode/utf8"
 
 	"maintainer-board/internal/ao"
 	"maintainer-board/internal/db"
@@ -37,6 +39,65 @@ type fakeAO struct {
 	killed        []string
 	renamed       []string
 	nextID        int
+
+	// Model catalogs per agent, model pickers per session, and every
+	// settings change received.
+	agentModels   map[string]*ao.AgentModels
+	convModels    map[string]*ao.ConversationModels
+	modelsErr     error
+	settingsErr   error
+	settingsCalls []string
+}
+
+func (f *fakeAO) AgentModels(_ context.Context, agent string) (*ao.AgentModels, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.modelsErr != nil {
+		return nil, f.modelsErr
+	}
+	if m, ok := f.agentModels[agent]; ok {
+		return m, nil
+	}
+	return nil, &ao.APIError{Status: 404, Code: "AGENT_NOT_FOUND", Message: "Unknown agent adapter"}
+}
+
+func (f *fakeAO) ConversationModels(_ context.Context, id string) (*ao.ConversationModels, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if m, ok := f.convModels[id]; ok {
+		out := *m
+		return &out, nil
+	}
+	return nil, &ao.APIError{Status: 404, Code: "SESSION_NOT_FOUND", Message: "session not found"}
+}
+
+// UpdateConversationSettings stores whatever it is given, like the real
+// daemon: it does not check that the model exists.
+func (f *fakeAO) UpdateConversationSettings(_ context.Context, id string, settings ao.ConversationTurnSettings) (*ao.ConversationSettings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.settingsErr != nil {
+		return nil, f.settingsErr
+	}
+	m, ok := f.convModels[id]
+	if !ok {
+		return nil, &ao.APIError{Status: 404, Code: "SESSION_NOT_FOUND", Message: "session not found"}
+	}
+	show := func(v *string) string {
+		if v == nil {
+			return "-"
+		}
+		return "[" + *v + "]"
+	}
+	f.settingsCalls = append(f.settingsCalls, id+" model="+show(settings.Model)+" effort="+show(settings.ReasoningEffort)+" approval="+show(settings.ApprovalMode))
+	if settings.Model != nil {
+		m.Selected.Model = *settings.Model
+	}
+	if settings.ReasoningEffort != nil {
+		m.Selected.ReasoningEffort = *settings.ReasoningEffort
+	}
+	out := m.Selected
+	return &out, nil
 }
 
 func (f *fakeAO) ListSessions(context.Context) ([]ao.Session, error) {
@@ -185,11 +246,38 @@ func (f *fakeGitHub) update(key string, fn func(s *github.Snapshot)) {
 	fn(&f.items[key].Snapshot)
 }
 
+func (f *fakeGitHub) updateItem(key string, fn func(it *github.Item)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f.items[key])
+}
+
 type fakeAI struct {
 	text  string
 	err   error
 	input summary.Input
 	calls int
+
+	// AI search: the answer to give, and what was asked.
+	searchMatches []summary.SearchMatch
+	searchErr     error
+	searchInput   summary.SearchInput
+	searchCalls   int
+	// searchGate, when set, blocks Search until it is closed.
+	searchGate    chan struct{}
+	searchStarted chan struct{}
+}
+
+func (f *fakeAI) Search(_ context.Context, in summary.SearchInput) ([]summary.SearchMatch, string, error) {
+	f.searchCalls++
+	f.searchInput = in
+	if f.searchStarted != nil {
+		close(f.searchStarted)
+	}
+	if f.searchGate != nil {
+		<-f.searchGate
+	}
+	return f.searchMatches, "codex", f.searchErr
 }
 
 func (f *fakeAI) Summarize(_ context.Context, in summary.Input) (string, string, error) {
@@ -945,6 +1033,809 @@ func TestLinkUnlinkAndAckErrors(t *testing.T) {
 	pending := hn.must(201, "POST", "/api/cards", map[string]any{"title": "Pending", "githubRef": "#6247"})["card"].(map[string]any)["id"].(string)
 	if code := hn.errorCode(409, "POST", "/api/cards/"+pending+"/ack", nil); code != "NOT_SYNCED" {
 		t.Errorf("ack before the first sync: code = %s", code)
+	}
+}
+
+// Times around the moment a test marks a card reviewed: the handler stamps
+// the mark with the wall clock, so "later" has to be in the future.
+const (
+	longAgo   = "2026-11-17T04:54:40Z"
+	reviewAt  = "2026-11-24T13:15:12Z"
+	farFuture = "2099-01-01T00:00:00Z"
+	evenLater = "2099-01-02T00:00:00Z"
+)
+
+func TestPersonalReviewFromGitHub(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "JesseStutler"
+	const key = "volcano-sh/volcano#6247"
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.MyReview = github.MyReview{State: github.MyReviewCommented, At: reviewAt, CommitSHA: "aaa"}
+		it.LastCommitAt, it.LastOtherActivityAt = longAgo, longAgo
+	})
+	id := hn.newLinkedCard("waiting")
+	sync := func() *db.Card {
+		t.Helper()
+		hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
+		return hn.card(id)
+	}
+
+	// The review is visible right after linking, although GitHub still says
+	// the pull request as a whole needs review.
+	c := hn.card(id)
+	if c.GHMyReviewState != "COMMENTED" || c.GHMyReviewedAt != reviewAt || c.GHIsStaleReview || c.GHReviewDecision != github.ReviewRequired {
+		t.Fatalf("linked card = %q at %q stale %v decision %q", c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview, c.GHReviewDecision)
+	}
+	board := hn.must(200, "GET", "/api/board", nil)
+	if board["currentUser"] != "JesseStutler" {
+		t.Fatalf("board currentUser = %v", board["currentUser"])
+	}
+	view := board["cards"].([]any)[0].(map[string]any)
+	if view["ghMyReviewState"] != "COMMENTED" || view["ghMyReviewedAt"] != reviewAt || view["ghIsStaleReview"] != false || view["ghAuthor"] != "mohit" {
+		t.Fatalf("card in the board payload = %v", view)
+	}
+
+	// The author pushes a commit: the review is out of date.
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.Snapshot.Commits, it.Snapshot.HeadSHA, it.LastCommitAt = 2, "bbb", farFuture
+	})
+	if c = sync(); !c.GHIsStaleReview || c.GHMyReviewState != "COMMENTED" || c.GHMyReviewedAt != reviewAt || !c.HasUnreadUpdates {
+		t.Fatalf("after a push = %q at %q stale %v unread %v", c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview, c.HasUnreadUpdates)
+	}
+
+	// Looking at the push and marking the card caught up settles it; the
+	// state stays the one from GitHub and the reference time moves.
+	acked := hn.must(200, "POST", "/api/cards/"+id+"/ack", nil)
+	if acked["ghIsStaleReview"] != false || acked["ghMyReviewState"] != "COMMENTED" || acked["ghMyReviewedAt"] == reviewAt {
+		t.Fatalf("acked card = %v", acked)
+	}
+	markedAt := acked["ghMyReviewedAt"].(string)
+	if c = sync(); c.GHIsStaleReview || c.GHMyReviewedAt != markedAt {
+		t.Fatalf("sync after the ack = stale %v at %q, want %q", c.GHIsStaleReview, c.GHMyReviewedAt, markedAt)
+	}
+
+	// The author answers in a comment: out of date again.
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.Snapshot.Comments, it.LastOtherActivityAt = 8, farFuture
+	})
+	if c = sync(); !c.GHIsStaleReview {
+		t.Fatalf("a reply after the review did not make it stale: %+v", c)
+	}
+
+	// A new review on GitHub replaces the state and is current again.
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.MyReview = github.MyReview{State: github.MyReviewApproved, At: evenLater, CommitSHA: "bbb"}
+	})
+	if c = sync(); c.GHMyReviewState != "APPROVED" || c.GHMyReviewedAt != evenLater || c.GHIsStaleReview {
+		t.Fatalf("after approving = %q at %q stale %v", c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview)
+	}
+	// A review submitted on GitHub cannot be cleared from the board.
+	if code := hn.errorCode(409, "POST", "/api/cards/"+id+"/unreview", nil); code != "REVIEW_FROM_GITHUB" {
+		t.Fatalf("unreview of a GitHub review: code = %s", code)
+	}
+
+	// Unlinking drops the review along with the rest of the tracking state.
+	out := hn.must(200, "POST", "/api/cards/"+id+"/unlink-github", nil)
+	if out["ghMyReviewState"] != "" || out["ghMyReviewedAt"] != "" || out["ghIsStaleReview"] != false {
+		t.Fatalf("unlinked card = %v", out)
+	}
+}
+
+func TestMarkReviewedByHand(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "JesseStutler"
+	const issueKey = "volcano-sh/volcano#6100"
+	hn.gh.updateItem(issueKey, func(it *github.Item) { it.Author, it.LastOtherActivityAt = "reporter", longAgo })
+	id := hn.must(201, "POST", "/api/cards", map[string]any{"githubRef": "#6100", "columnId": "waiting"})["card"].(map[string]any)["id"].(string)
+	if c := hn.card(id); c.GHMyReviewState != "" || c.GHIsStaleReview {
+		t.Fatalf("an item nobody reviewed = %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
+	}
+
+	// Nothing is unread, so the timeline calls it a review, not a catch-up.
+	acked := hn.must(200, "POST", "/api/cards/"+id+"/ack", nil)
+	if acked["ghMyReviewState"] != "REVIEWED" || acked["ghMyReviewedAt"] == "" || acked["ghIsStaleReview"] != false {
+		t.Fatalf("marked card = %v", acked)
+	}
+	if got := hn.eventMessages(id); got[len(got)-1] != "Marked reviewed" {
+		t.Fatalf("timeline = %q", got)
+	}
+	// GitHub has no review for an issue; the mark survives every sync.
+	hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
+	if c := hn.card(id); c.GHMyReviewState != "REVIEWED" || c.GHIsStaleReview {
+		t.Fatalf("after a sync = %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
+	}
+
+	// Somebody comments later: the card asks for another look.
+	hn.gh.updateItem(issueKey, func(it *github.Item) { it.Snapshot.Comments, it.LastOtherActivityAt = 3, farFuture })
+	hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
+	if c := hn.card(id); c.GHMyReviewState != "REVIEWED" || !c.GHIsStaleReview || !c.HasUnreadUpdates {
+		t.Fatalf("after a new comment = %q stale %v unread %v", c.GHMyReviewState, c.GHIsStaleReview, c.HasUnreadUpdates)
+	}
+
+	// The mark can be taken back, and clearing twice is harmless.
+	for range 2 {
+		out := hn.must(200, "POST", "/api/cards/"+id+"/unreview", nil)
+		if out["ghMyReviewState"] != "" || out["ghMyReviewedAt"] != "" || out["ghIsStaleReview"] != false {
+			t.Fatalf("cleared card = %v", out)
+		}
+	}
+	hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
+	if c := hn.card(id); c.GHMyReviewState != "" || c.GHIsStaleReview {
+		t.Fatalf("a cleared mark came back: %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
+	}
+
+	// A new head after a manual mark on a pull request is stale too.
+	pr := hn.newLinkedCard("waiting")
+	hn.must(200, "POST", "/api/cards/"+pr+"/ack", nil)
+	hn.gh.update("volcano-sh/volcano#6247", func(s *github.Snapshot) { s.Commits, s.HeadSHA = 2, "bbb" })
+	hn.must(200, "POST", "/api/cards/"+pr+"/sync-github", nil)
+	if c := hn.card(pr); c.GHMyReviewState != "REVIEWED" || !c.GHIsStaleReview {
+		t.Fatalf("manual mark after a push = %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
+	}
+
+	// Nobody reviews their own pull request: catching up leaves no mark.
+	hn.srv.cfg.CurrentUser = "Mohit"
+	own := hn.newLinkedCard("waiting")
+	if out := hn.must(200, "POST", "/api/cards/"+own+"/ack", nil); out["ghMyReviewState"] != "" || out["ghMyReviewedAt"] != "" {
+		t.Fatalf("own pull request after ack = %v", out)
+	}
+	// A mark made before the author was known is dropped on the next sync.
+	hn.must(200, "POST", "/api/cards/"+pr+"/sync-github", nil)
+	if c := hn.card(pr); c.GHMyReviewState != "" || c.GHIsStaleReview {
+		t.Fatalf("own pull request kept a review mark: %q stale %v", c.GHMyReviewState, c.GHIsStaleReview)
+	}
+}
+
+// fakeUserGitHub is a GitHub client that can also name its account.
+type fakeUserGitHub struct {
+	*fakeGitHub
+	mu      sync.Mutex
+	login   string
+	pending string
+	err     error
+}
+
+func (f *fakeUserGitHub) User() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.login
+}
+
+func (f *fakeUserGitHub) DetectUser(context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return "", f.err
+	}
+	f.login = f.pending
+	return f.login, nil
+}
+
+func TestCurrentUserComesFromTheGitHubClient(t *testing.T) {
+	hn := newHarness(t)
+	gh := &fakeUserGitHub{fakeGitHub: hn.gh, pending: "JesseStutler", err: fmt.Errorf("%w: offline", github.ErrUnavailable)}
+	hn.srv.gh = gh
+
+	// Offline at startup: the board works and simply does not know the user.
+	hn.srv.resolveCurrentUser(context.Background())
+	if got := hn.must(200, "GET", "/api/board", nil)["currentUser"]; got != "" {
+		t.Fatalf("currentUser while gh is unreachable = %v", got)
+	}
+	// The next attempt succeeds and the board picks it up.
+	gh.mu.Lock()
+	gh.err = nil
+	gh.mu.Unlock()
+	hn.srv.resolveCurrentUser(context.Background())
+	if got := hn.must(200, "GET", "/api/board", nil)["currentUser"]; got != "JesseStutler" {
+		t.Fatalf("currentUser after detection = %v", got)
+	}
+	// An explicit --gh-user wins over the detected login.
+	hn.srv.cfg.CurrentUser = "someone-else"
+	if got := hn.must(200, "GET", "/api/board", nil)["currentUser"]; got != "someone-else" {
+		t.Fatalf("currentUser with an explicit login = %v", got)
+	}
+}
+
+// searchHarness is a board with three session cards whose conversations
+// are indexed: a Codex review of PR #6247 and two Copilot sessions.
+func searchHarness(t *testing.T) (*harness, map[string]string) {
+	t.Helper()
+	hn := newHarness(t)
+	hn.ao.sessions = []ao.Session{
+		worker("standalone-1", "codex", "[PR #6247][Review] CSI limits"),
+		worker("volcano-2", "copilot", "Kubeflow Trainer design"),
+		worker("volcano-3", "copilot", "PodGroup comparison"),
+	}
+	msg := func(id string, seq int64, role, text string) ao.Message {
+		return ao.Message{Kind: "message", ID: id, Sequence: seq, Role: role, Text: text, CreatedAt: "2026-11-24T13:12:00Z"}
+	}
+	hn.ao.conversations = map[string]*ao.Conversation{
+		"standalone-1": {SessionID: "standalone-1", Messages: []ao.Message{
+			msg("a1", 1, "user", "Please review the change that removes the CSI scalar accounting."),
+			msg("a2", 2, "assistant", "Removing the scalar changes preemption eligibility: HasSchedulingResourceRequests() now returns false, so the victim filter in preempt.go excludes lower-priority pods."),
+			msg("a3", 3, "assistant", "Recommendation: hold the merge until the regression is covered by an end-to-end case."),
+			msg("a4", 4, "assistant", "half written answer about hostpath"),
+		}},
+		"volcano-2": {SessionID: "volcano-2", Messages: []ao.Message{
+			msg("b1", 1, "user", "\u8bbe\u8ba1 CompositePodGroup \u4e0e Kubeflow Trainer \u7684\u96c6\u6210\u65b9\u6848"),
+			msg("b2", 2, "assistant", "The TrainJob controller creates one PodGroup per replicated job; minMember comes from numNodes."),
+			msg("b3", 3, "assistant", "Next step: write the proposal document and send it to the maintainers for a first review."),
+		}},
+		"volcano-3": {SessionID: "volcano-3", Messages: []ao.Message{
+			msg("c1", 1, "user", "Compare the upstream scheduling.k8s.io PodGroup API with ours."),
+			msg("c2", 2, "assistant", "The two APIs differ mostly in how minimum membership and queues are expressed; a table follows."),
+		}},
+	}
+	// The card summary is extracted from the last complete assistant
+	// message, so the details of earlier messages exist only in the chat.
+	hn.ao.conversations["standalone-1"].Messages[3].Streaming = true
+	hn.syncAO()
+	hn.srv.indexContent(context.Background())
+	ids := map[string]string{}
+	for _, sid := range []string{"standalone-1", "volcano-2", "volcano-3"} {
+		c := hn.cardBySession(sid)
+		if c == nil {
+			t.Fatalf("no card for session %s", sid)
+		}
+		ids[sid] = c.ID
+	}
+	return hn, ids
+}
+
+// searchFor returns the matches of a keyword search by card ID.
+func (hn *harness) searchFor(q string) map[string]map[string]any {
+	hn.t.Helper()
+	out := hn.must(200, "GET", "/api/search?q="+url.QueryEscape(q), nil)
+	matches := map[string]map[string]any{}
+	for _, m := range out["matches"].([]any) {
+		m := m.(map[string]any)
+		matches[m["cardId"].(string)] = m
+	}
+	return matches
+}
+
+func matchedBy(m map[string]any) string {
+	var parts []string
+	for _, v := range m["matchedBy"].([]any) {
+		parts = append(parts, v.(string))
+	}
+	return strings.Join(parts, ",")
+}
+
+func TestSearchBySessionID(t *testing.T) {
+	hn, ids := searchHarness(t)
+
+	// The full ID, a part of it, and any letter case all find the card,
+	// although the ID is not part of the title or summary.
+	for _, q := range []string{"volcano-2", "VOLCANO-2", "cano-2"} {
+		got := hn.searchFor(q)
+		m := got[ids["volcano-2"]]
+		if len(got) != 1 || m == nil || matchedBy(m) != "sessionId" || m["reason"] != "Matched ID: volcano-2" || m["sessionId"] != "volcano-2" {
+			t.Errorf("search %q = %v", q, got)
+		}
+	}
+	// A shared prefix matches every session carrying it.
+	got := hn.searchFor("standalone")
+	if m := got[ids["standalone-1"]]; len(got) != 1 || m == nil || m["reason"] != "Matched ID: standalone-1" {
+		t.Errorf("search by ID prefix = %v", got)
+	}
+	// The repository name of the linked pull request contains "volcano",
+	// so that card matches on its own fields and gets no ID badge.
+	got = hn.searchFor("volcano")
+	if len(got) != 3 || matchedBy(got[ids["standalone-1"]]) != "card" || got[ids["standalone-1"]]["reason"] != "" ||
+		matchedBy(got[ids["volcano-2"]]) != "sessionId" || matchedBy(got[ids["volcano-3"]]) != "sessionId" {
+		t.Errorf("search volcano = %v", got)
+	}
+	// Terms combine: one in the title, one in the ID.
+	if got := hn.searchFor("kubeflow volcano-2"); len(got) != 1 || matchedBy(got[ids["volcano-2"]]) != "sessionId" {
+		t.Errorf("title term plus ID term = %v", got)
+	}
+	if got := hn.searchFor("kubeflow volcano-3"); len(got) != 0 {
+		t.Errorf("terms of two different cards matched %v", got)
+	}
+
+	// AO names the session branch after the ID. The ID still gets the
+	// credit, and the branch and agent name stay searchable on their own.
+	hn.ao.set(func() { hn.ao.sessions[1].Branch = "ao/volcano-2/import" })
+	hn.syncAO()
+	if got := hn.searchFor("volcano-2"); len(got) != 1 || got[ids["volcano-2"]]["reason"] != "Matched ID: volcano-2" {
+		t.Errorf("ID that is also part of the branch = %v", got)
+	}
+	if got := hn.searchFor("ao/volcano-2/import"); len(got) != 1 || matchedBy(got[ids["volcano-2"]]) != "card" {
+		t.Errorf("search by branch = %v", got)
+	}
+	if got := hn.searchFor("codex"); len(got) != 1 || matchedBy(got[ids["standalone-1"]]) != "card" {
+		t.Errorf("search by agent = %v", got)
+	}
+}
+
+func TestSearchConversationContent(t *testing.T) {
+	hn, ids := searchHarness(t)
+
+	// A function name that only appears inside the chat.
+	got := hn.searchFor("hasschedulingresourcerequests")
+	m := got[ids["standalone-1"]]
+	if len(got) != 1 || m == nil || matchedBy(m) != "conversation" || m["role"] != "assistant" || m["messages"] != float64(1) {
+		t.Fatalf("content search = %v", got)
+	}
+	snip := m["snippet"].(string)
+	if !strings.Contains(snip, "HasSchedulingResourceRequests() now returns false") || !strings.HasPrefix(snip, "...") || m["reason"] != "In chat: "+snip {
+		t.Fatalf("snippet = %q, reason = %q", snip, m["reason"])
+	}
+	if len([]rune(snip)) > 200 {
+		t.Fatalf("snippet is not short: %d runes", len([]rune(snip)))
+	}
+
+	// Chinese text has no word boundaries; a substring still matches.
+	if got := hn.searchFor("\u96c6\u6210\u65b9\u6848"); len(got) != 1 || matchedBy(got[ids["volcano-2"]]) != "conversation" {
+		t.Errorf("CJK content search = %v", got)
+	}
+	// One term from the card, one from its conversation.
+	if got := hn.searchFor("kubeflow minMember"); len(got) != 1 || matchedBy(got[ids["volcano-2"]]) != "conversation" {
+		t.Errorf("card term plus chat term = %v", got)
+	}
+	// ID and conversation together report both sources, ID first.
+	got = hn.searchFor("volcano-3 scheduling.k8s.io")
+	if m := got[ids["volcano-3"]]; len(got) != 1 || matchedBy(m) != "sessionId,conversation" || m["reason"] != "Matched ID: volcano-3" || m["snippet"] == "" {
+		t.Errorf("ID plus chat term = %v", got)
+	}
+	// A message that is still streaming is not indexed yet.
+	if got := hn.searchFor("hostpath"); len(got) != 0 {
+		t.Errorf("a streaming message was indexed: %v", got)
+	}
+	if got := hn.searchFor("nothing-says-this"); len(got) != 0 {
+		t.Errorf("unexpected matches %v", got)
+	}
+
+	out := hn.must(200, "GET", "/api/search?q=", nil)
+	index := out["index"].(map[string]any)
+	if len(out["matches"].([]any)) != 0 || index["sessions"] != float64(3) || index["messages"] != float64(8) {
+		t.Fatalf("empty query = %v", out)
+	}
+
+	// New messages are picked up by the next index pass, including the
+	// one that finished streaming.
+	hn.ao.set(func() {
+		conv := hn.ao.conversations["standalone-1"]
+		conv.Messages[3].Streaming = false
+		conv.Messages = append(conv.Messages, ao.Message{Kind: "message", ID: "a5", Sequence: 5, Role: "user", Text: "What does install-csi-hostpath.sh do?"})
+		hn.ao.sessions[0].Activity.LastActivityAt = "t2"
+	})
+	hn.syncAO()
+	hn.srv.index.mu.Lock()
+	hn.srv.index.seen = map[string]indexMark{}
+	hn.srv.index.mu.Unlock()
+	hn.srv.indexContent(context.Background())
+	got = hn.searchFor("hostpath")
+	if m := got[ids["standalone-1"]]; len(got) != 1 || m["messages"] != float64(2) || !strings.Contains(m["snippet"].(string), "install-csi-hostpath.sh") {
+		t.Fatalf("after new messages = %v", got)
+	}
+
+	// A card without a session is searched by its own fields only.
+	hn.must(201, "POST", "/api/cards", map[string]any{"title": "Write release notes", "notes": "mention preempt.go"})
+	got = hn.searchFor("preempt.go")
+	if len(got) != 2 {
+		t.Fatalf("notes plus conversation = %v", got)
+	}
+}
+
+func TestIndexFollowsARolledBackConversation(t *testing.T) {
+	hn, ids := searchHarness(t)
+	if got := hn.searchFor("minMember"); len(got) != 1 {
+		t.Fatalf("before the rollback = %v", got)
+	}
+	// AO reports a conversation that ends before the indexed position.
+	hn.ao.set(func() {
+		hn.ao.conversations["volcano-2"] = &ao.Conversation{SessionID: "volcano-2", Messages: []ao.Message{
+			{Kind: "message", ID: "b9", Sequence: 1, Role: "user", Text: "Start over with a queue design."},
+		}}
+	})
+	if err := hn.srv.indexSession(context.Background(), "volcano-2", 500, "stamp", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := hn.searchFor("minMember"); len(got) != 0 {
+		t.Fatalf("text of the dropped branch is still found: %v", got)
+	}
+	if got := hn.searchFor("queue design"); len(got) != 1 || got[ids["volcano-2"]] == nil {
+		t.Fatalf("the new branch is not indexed: %v", got)
+	}
+}
+
+func TestAISearch(t *testing.T) {
+	hn, ids := searchHarness(t)
+	hn.must(200, "PATCH", "/api/cards/"+ids["volcano-2"], map[string]any{"notes": "Waiting for the Kubeflow maintainers.", "tags": []string{"kubeflow"}})
+	hn.ai.searchMatches = []summary.SearchMatch{
+		{CardID: ids["standalone-1"], Reason: "Discusses CSI scalar removal and the preemption regression in PR #6247"},
+		{CardID: ids["volcano-2"], Reason: "Designs the Kubeflow Trainer integration"},
+	}
+	out := hn.must(200, "POST", "/api/search/ai", map[string]any{"query": "  where did we talk about\n preemption  regressions? "})
+	if out["query"] != "where did we talk about preemption regressions?" || out["engine"] != "codex" || out["cards"] != float64(3) {
+		t.Fatalf("response = %v", out)
+	}
+	matches := out["matches"].([]any)
+	first := matches[0].(map[string]any)
+	if len(matches) != 2 || first["cardId"] != ids["standalone-1"] || first["reason"] != "Discusses CSI scalar removal and the preemption regression in PR #6247" {
+		t.Fatalf("matches = %v", matches)
+	}
+
+	// The corpus describes every card, the one with keyword hits first,
+	// with its session ID and excerpts of the conversation.
+	in := hn.ai.searchInput
+	if in.Query != "where did we talk about preemption regressions?" || len(in.Cards) != 3 || in.Cards[0].ID != ids["standalone-1"] {
+		t.Fatalf("search input = %+v", in)
+	}
+	review := in.Cards[0]
+	if review.SessionID != "standalone-1" || review.Agent != "codex" || review.Category != "PR Review" || review.Column != "Inbox" ||
+		!strings.Contains(review.GitHub, "volcano-sh/volcano#6247") || !strings.Contains(review.GitHub, "mohit") {
+		t.Fatalf("review card in the corpus = %+v", review)
+	}
+	joined := strings.Join(review.Excerpts, "\n")
+	if !strings.Contains(joined, "[user, first message] Please review the change") || !strings.Contains(joined, "changes preemption eligibility") {
+		t.Fatalf("excerpts = %q", review.Excerpts)
+	}
+	var design summary.SearchCard
+	for _, c := range in.Cards {
+		if c.ID == ids["volcano-2"] {
+			design = c
+		}
+	}
+	if design.Notes != "Waiting for the Kubeflow maintainers." || len(design.Tags) != 1 || design.SessionID != "volcano-2" || len(design.Excerpts) != 3 {
+		t.Fatalf("design card in the corpus = %+v", design)
+	}
+
+	// No matches is a normal answer, with an empty list rather than null.
+	hn.ai.searchMatches = nil
+	out = hn.must(200, "POST", "/api/search/ai", map[string]any{"query": "anything about GPUs"})
+	if list, ok := out["matches"].([]any); !ok || len(list) != 0 {
+		t.Fatalf("empty answer = %v", out)
+	}
+
+	if code := hn.errorCode(400, "POST", "/api/search/ai", map[string]any{"query": "   "}); code != "INVALID_INPUT" {
+		t.Errorf("blank query: code = %s", code)
+	}
+	calls := hn.ai.searchCalls
+	hn.ai.searchErr = errors.New("AI search failed: copilot timed out; codex failed: quota")
+	out = hn.must(502, "POST", "/api/search/ai", map[string]any{"query": "x"})
+	if e := out["error"].(map[string]any); e["code"] != "AI_SEARCH_FAILED" || !strings.Contains(e["message"].(string), "copilot timed out; codex failed: quota") {
+		t.Errorf("failure response = %v", out)
+	}
+	if hn.ai.searchCalls != calls+1 {
+		t.Errorf("the model was called %d times for one request", hn.ai.searchCalls-calls)
+	}
+}
+
+func TestAISearchRunsOneAtATime(t *testing.T) {
+	hn, _ := searchHarness(t)
+	hn.ai.searchGate, hn.ai.searchStarted = make(chan struct{}), make(chan struct{})
+	done := make(chan int, 1)
+	go func() {
+		status, _ := hn.call("POST", "/api/search/ai", map[string]any{"query": "first"})
+		done <- status
+	}()
+	<-hn.ai.searchStarted
+	if code := hn.errorCode(409, "POST", "/api/search/ai", map[string]any{"query": "second"}); code != "AI_SEARCH_BUSY" {
+		t.Errorf("concurrent search: code = %s", code)
+	}
+	close(hn.ai.searchGate)
+	if status := <-done; status != 200 {
+		t.Fatalf("first search = %d", status)
+	}
+	hn.ai.searchGate, hn.ai.searchStarted = nil, nil
+	hn.must(200, "POST", "/api/search/ai", map[string]any{"query": "third"})
+}
+
+func TestAISearchOnAnEmptyBoardSkipsTheModel(t *testing.T) {
+	hn := newHarness(t)
+	out := hn.must(200, "POST", "/api/search/ai", map[string]any{"query": "anything"})
+	if hn.ai.searchCalls != 0 || out["cards"] != float64(0) || len(out["matches"].([]any)) != 0 {
+		t.Fatalf("empty board: calls = %d, response = %v", hn.ai.searchCalls, out)
+	}
+}
+
+func TestSnippet(t *testing.T) {
+	long := strings.Repeat("alpha beta gamma ", 20) + "the NEEDLE is here " + strings.Repeat("delta epsilon ", 30)
+	cases := []struct {
+		name, text, term, want string
+	}{
+		{"short text is returned whole", "A short  message\nabout   quotas.", "quotas", "A short message about quotas."},
+		{"missing term shows the start", "Only this.", "absent", "Only this."},
+		{"case-insensitive", "Check PreEmpt.go now", "preempt.go", "Check PreEmpt.go now"},
+	}
+	for _, tc := range cases {
+		if got := snippet(tc.text, tc.term); got != tc.want {
+			t.Errorf("%s: snippet = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	got := snippet(long, "needle")
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, "...") || !strings.Contains(got, "the NEEDLE is here") || len(got) > 190 {
+		t.Errorf("windowed snippet = %q", got)
+	}
+	// Multi-byte text is cut on character boundaries.
+	cjk := strings.Repeat("\u8c03\u5ea6\u5668", 60) + "\u62a2\u5360" + strings.Repeat("\u961f\u5217", 80)
+	got = snippet(cjk, "\u62a2\u5360")
+	if !utf8.ValidString(got) || !strings.Contains(got, "\u62a2\u5360") || len([]rune(got)) > 170 {
+		t.Errorf("CJK snippet = %q", got)
+	}
+	// Emoji never reach the card face.
+	if got := snippet("done \U0001F44D thanks", "thanks"); got != "done thanks" {
+		t.Errorf("emoji snippet = %q", got)
+	}
+	// Markdown marks are dropped; the words stay.
+	if got := snippet("Run **`install-csi-hostpath.sh`** from [the guide](https://example.com/guide) first:\n```sh\nmake e2e\n```", "hostpath"); got != "Run install-csi-hostpath.sh from the guide first: sh make e2e" {
+		t.Errorf("markdown snippet = %q", got)
+	}
+}
+
+func TestSearchTerms(t *testing.T) {
+	if got := searchTerms("  CSI  csi Limits\tPR#6247 "); !reflect.DeepEqual(got, []string{"csi", "limits", "pr#6247"}) {
+		t.Errorf("searchTerms = %q", got)
+	}
+	if got := searchTerms("a b c d e f g h i j"); len(got) != maxSearchTerms {
+		t.Errorf("term count = %d, want the cap %d", len(got), maxSearchTerms)
+	}
+	if got := keywordTerms("Where did we talk about the preemption regression, and why?"); !reflect.DeepEqual(got, []string{"talk", "preemption", "regression"}) {
+		t.Errorf("keywordTerms = %q", got)
+	}
+}
+
+// modelHarness is a board with a running Codex session and an imported
+// Copilot session that was not resumed, plus the model catalogs of both
+// agents.
+func modelHarness(t *testing.T) (hn *harness, running, sleeping string) {
+	t.Helper()
+	hn = newHarness(t)
+	asleep := worker("volcano-2", "copilot", "Kubeflow design")
+	asleep.NeedsResume = true
+	hn.ao.sessions = []ao.Session{worker("standalone-1", "codex", "CSI review"), asleep}
+	efforts := []string{"low", "medium", "high"}
+	hn.ao.agentModels = map[string]*ao.AgentModels{
+		"codex": {AgentID: "codex", Models: []ao.AgentModel{
+			{ID: "gpt-6.2-sol", Label: "GPT-6.2-Sol", IsDefault: true, Efforts: efforts, DefaultEffort: "medium"},
+			{ID: "gpt-6.2-astra", Label: "GPT-6.2-Astra", Efforts: []string{"low", "high"}, DefaultEffort: "low"},
+		}},
+		"copilot": {AgentID: "copilot", Models: []ao.AgentModel{
+			{ID: "claude-sonnet-5", Label: "claude-sonnet-5", IsDefault: true},
+			{ID: "gemini-4-neon"},
+		}},
+	}
+	hn.ao.convModels = map[string]*ao.ConversationModels{
+		"standalone-1": {
+			Models: []ao.ConversationModel{
+				{ID: "gpt-6.2-sol", DisplayName: "GPT-6.2-Sol", Description: "Fast, go-to model.", Default: true, Efforts: efforts, DefaultEffort: "medium"},
+				{ID: "gpt-6.2-astra", DisplayName: "GPT-6.2-Astra", Efforts: []string{"low", "high"}, DefaultEffort: "low"},
+				{ID: "plain", DisplayName: "Plain"},
+			},
+			Selected: ao.ConversationSettings{Model: "gpt-6.2-sol", ReasoningEffort: "medium", ApprovalMode: "on-request"},
+		},
+		// AO reports no models for a session whose agent is not running.
+		"volcano-2": {Models: []ao.ConversationModel{}},
+	}
+	hn.syncAO()
+	return hn, hn.cardBySession("standalone-1").ID, hn.cardBySession("volcano-2").ID
+}
+
+func modelIDs(out map[string]any) string {
+	var ids []string
+	for _, m := range out["models"].([]any) {
+		ids = append(ids, m.(map[string]any)["id"].(string))
+	}
+	return strings.Join(ids, ",")
+}
+
+func TestAgentModelsEndpoint(t *testing.T) {
+	hn, _, _ := modelHarness(t)
+	out := hn.must(200, "GET", "/api/ao/agents/codex/models", nil)
+	first := out["models"].([]any)[0].(map[string]any)
+	if out["agent"] != "codex" || modelIDs(out) != "gpt-6.2-sol,gpt-6.2-astra" || first["label"] != "GPT-6.2-Sol" || first["isDefault"] != true ||
+		first["defaultEffort"] != "medium" || !reflect.DeepEqual(first["efforts"], []any{"low", "medium", "high"}) {
+		t.Fatalf("codex models = %v", out)
+	}
+	// A model without a label is shown by its ID, and efforts is a list
+	// even when the model has none.
+	out = hn.must(200, "GET", "/api/ao/agents/copilot/models", nil)
+	second := out["models"].([]any)[1].(map[string]any)
+	if second["label"] != "gemini-4-neon" || second["isDefault"] != false || !reflect.DeepEqual(second["efforts"], []any{}) {
+		t.Fatalf("copilot models = %v", out)
+	}
+	if code := hn.errorCode(400, "GET", "/api/ao/agents/gemini/models", nil); code != "INVALID_INPUT" {
+		t.Errorf("unknown agent: code = %s", code)
+	}
+	hn.ao.set(func() { hn.ao.modelsErr = fmt.Errorf("%w: connection refused", ao.ErrUnavailable) })
+	if code := hn.errorCode(503, "GET", "/api/ao/agents/codex/models", nil); code != "AO_OFFLINE" {
+		t.Errorf("AO offline: code = %s", code)
+	}
+}
+
+func TestCardModels(t *testing.T) {
+	hn, running, sleeping := modelHarness(t)
+
+	// A running session answers for itself.
+	out := hn.must(200, "GET", "/api/cards/"+running+"/models", nil)
+	selected := out["selected"].(map[string]any)
+	first := out["models"].([]any)[0].(map[string]any)
+	if out["sessionId"] != "standalone-1" || out["harness"] != "codex" || out["needsResume"] != false || out["source"] != "session" ||
+		modelIDs(out) != "gpt-6.2-sol,gpt-6.2-astra,plain" || selected["model"] != "gpt-6.2-sol" || selected["reasoningEffort"] != "medium" ||
+		first["label"] != "GPT-6.2-Sol" || first["description"] != "Fast, go-to model." || first["isDefault"] != true {
+		t.Fatalf("running session models = %v", out)
+	}
+
+	// A session that was not resumed has no list of its own: the picker
+	// is filled from the agent's catalog and the response says so.
+	out = hn.must(200, "GET", "/api/cards/"+sleeping+"/models", nil)
+	if out["harness"] != "copilot" || out["needsResume"] != true || out["source"] != "agent" || modelIDs(out) != "claude-sonnet-5,gemini-4-neon" ||
+		out["selected"].(map[string]any)["model"] != "" {
+		t.Fatalf("sleeping session models = %v", out)
+	}
+	// A selection made earlier survives the fallback.
+	hn.ao.set(func() { hn.ao.convModels["volcano-2"].Selected.Model = "gemini-4-neon" })
+	out = hn.must(200, "GET", "/api/cards/"+sleeping+"/models", nil)
+	if out["selected"].(map[string]any)["model"] != "gemini-4-neon" || out["source"] != "agent" {
+		t.Fatalf("selection of a sleeping session = %v", out)
+	}
+	// When the session cannot answer at all, its agent's catalog still does.
+	hn.ao.set(func() { delete(hn.ao.convModels, "volcano-2") })
+	out = hn.must(200, "GET", "/api/cards/"+sleeping+"/models", nil)
+	if out["source"] != "agent" || modelIDs(out) != "claude-sonnet-5,gemini-4-neon" {
+		t.Fatalf("fallback without a session answer = %v", out)
+	}
+	// Neither source: the AO error is passed on.
+	hn.ao.set(func() {
+		hn.ao.modelsErr = &ao.APIError{Status: 500, Code: "MODELS_UNAVAILABLE", Message: "catalog refresh failed"}
+	})
+	if code := hn.errorCode(404, "GET", "/api/cards/"+sleeping+"/models", nil); code != "SESSION_NOT_FOUND" {
+		t.Errorf("no source at all: code = %s", code)
+	}
+
+	plain := hn.must(201, "POST", "/api/cards", map[string]any{"title": "No agent"})["card"].(map[string]any)["id"].(string)
+	if code := hn.errorCode(409, "GET", "/api/cards/"+plain+"/models", nil); code != "NO_SESSION" {
+		t.Errorf("card without a session: code = %s", code)
+	}
+	if code := hn.errorCode(404, "GET", "/api/cards/c_missing/models", nil); code != "NOT_FOUND" {
+		t.Errorf("missing card: code = %s", code)
+	}
+}
+
+func TestCardSettingsSwitchesTheModel(t *testing.T) {
+	hn, running, sleeping := modelHarness(t)
+	last := func() string {
+		hn.ao.mu.Lock()
+		defer hn.ao.mu.Unlock()
+		if len(hn.ao.settingsCalls) == 0 {
+			return ""
+		}
+		return hn.ao.settingsCalls[len(hn.ao.settingsCalls)-1]
+	}
+
+	// Model and effort together.
+	out := hn.must(200, "PATCH", "/api/cards/"+running+"/settings", map[string]any{"model": "gpt-6.2-astra", "reasoningEffort": "high"})
+	selected := out["selected"].(map[string]any)
+	if out["sessionId"] != "standalone-1" || out["needsResume"] != false || selected["model"] != "gpt-6.2-astra" || selected["reasoningEffort"] != "high" {
+		t.Fatalf("switch = %v", out)
+	}
+	// The approval mode is never sent: the board does not touch it.
+	if got := last(); got != "standalone-1 model=[gpt-6.2-astra] effort=[high] approval=-" {
+		t.Fatalf("AO received %q", got)
+	}
+	// Only the effort: the model field is left out, so AO keeps it.
+	out = hn.must(200, "PATCH", "/api/cards/"+running+"/settings", map[string]any{"reasoningEffort": "low"})
+	if got := last(); got != "standalone-1 model=- effort=[low] approval=-" || out["selected"].(map[string]any)["model"] != "gpt-6.2-astra" {
+		t.Fatalf("effort only: AO received %q, response %v", got, out)
+	}
+	// An empty string resets to the agent's default.
+	out = hn.must(200, "PATCH", "/api/cards/"+running+"/settings", map[string]any{"model": "", "reasoningEffort": ""})
+	if got := last(); got != "standalone-1 model=[] effort=[] approval=-" || out["selected"].(map[string]any)["model"] != "" {
+		t.Fatalf("reset: AO received %q, response %v", got, out)
+	}
+	if got := hn.eventMessages(running); !reflect.DeepEqual(got[len(got)-3:], []string{
+		"Agent model set to gpt-6.2-astra (effort high)", "Agent model set to gpt-6.2-astra (effort low)", "Agent model set to the default model",
+	}) {
+		t.Fatalf("timeline = %q", got)
+	}
+
+	// AO would store any name; the board checks it first.
+	calls := len(hn.ao.settingsCalls)
+	for name, body := range map[string]map[string]any{
+		"unknown model":                     {"model": "no-such-model"},
+		"effort the model does not support": {"model": "gpt-6.2-astra", "reasoningEffort": "medium"},
+		"effort on a model without efforts": {"model": "plain", "reasoningEffort": "low"},
+		"effort unknown to the default":     {"reasoningEffort": "ultra"},
+	} {
+		if code := hn.errorCode(400, "PATCH", "/api/cards/"+running+"/settings", body); code != "UNKNOWN_MODEL" {
+			t.Errorf("%s: code = %s", name, code)
+		}
+	}
+	if code := hn.errorCode(400, "PATCH", "/api/cards/"+running+"/settings", map[string]any{}); code != "INVALID_INPUT" {
+		t.Errorf("empty change: code = %s", code)
+	}
+	if len(hn.ao.settingsCalls) != calls {
+		t.Fatalf("a rejected change reached AO: %q", hn.ao.settingsCalls[calls:])
+	}
+
+	// A session that was not resumed: validated against the agent's
+	// catalog, stored for later, and the response says it waits for Resume.
+	if code := hn.errorCode(400, "PATCH", "/api/cards/"+sleeping+"/settings", map[string]any{"model": "gpt-6.2-sol"}); code != "UNKNOWN_MODEL" {
+		t.Errorf("a Codex model on a Copilot session: code = %s", code)
+	}
+	out = hn.must(200, "PATCH", "/api/cards/"+sleeping+"/settings", map[string]any{"model": " gemini-4-neon "})
+	if out["needsResume"] != true || out["selected"].(map[string]any)["model"] != "gemini-4-neon" || last() != "volcano-2 model=[gemini-4-neon] effort=- approval=-" {
+		t.Fatalf("sleeping session switch = %v, AO received %q", out, last())
+	}
+	if got := hn.eventMessages(sleeping); got[len(got)-1] != "Agent model set to gemini-4-neon; applies once the session is resumed" {
+		t.Fatalf("timeline = %q", got)
+	}
+
+	// AO's own refusal is passed on with its code and a readable message.
+	hn.ao.set(func() {
+		hn.ao.settingsErr = &ao.APIError{Status: 409, Code: "SESSION_BUSY", Message: "session is busy"}
+	})
+	if code := hn.errorCode(409, "PATCH", "/api/cards/"+running+"/settings", map[string]any{"model": "plain"}); code != "SESSION_BUSY" {
+		t.Errorf("busy session: code = %s", code)
+	}
+	plain := hn.must(201, "POST", "/api/cards", map[string]any{"title": "No agent"})["card"].(map[string]any)["id"].(string)
+	if code := hn.errorCode(409, "PATCH", "/api/cards/"+plain+"/settings", map[string]any{"model": "plain"}); code != "NO_SESSION" {
+		t.Errorf("card without a session: code = %s", code)
+	}
+}
+
+func TestNewSessionWithModelAndEffort(t *testing.T) {
+	hn, _, _ := modelHarness(t)
+	spawned := func() ao.SpawnRequest {
+		hn.ao.mu.Lock()
+		defer hn.ao.mu.Unlock()
+		return hn.ao.spawned[len(hn.ao.spawned)-1]
+	}
+
+	// POST /api/cards with the model inside the agent block.
+	out := hn.must(201, "POST", "/api/cards", map[string]any{"title": "With a model", "agent": map[string]any{"harness": "codex", "prompt": "go", "model": "gpt-6.2-astra", "effort": "high"}})
+	if req := spawned(); req.Harness != "codex" || req.Model != "gpt-6.2-astra" || req.Effort != "high" || req.Prompt != "go" {
+		t.Fatalf("spawn request = %+v", req)
+	}
+	id := out["card"].(map[string]any)["id"].(string)
+	if got := hn.eventMessages(id); !strings.HasSuffix(got[len(got)-1], " with model gpt-6.2-astra (effort high)") {
+		t.Fatalf("timeline = %q", got)
+	}
+	// The top-level shorthand works too.
+	hn.must(201, "POST", "/api/cards", map[string]any{"title": "Shorthand", "model": "gemini-4-neon", "agent": map[string]any{"harness": "copilot"}})
+	if req := spawned(); req.Harness != "copilot" || req.Model != "gemini-4-neon" || req.Effort != "" {
+		t.Fatalf("spawn request = %+v", req)
+	}
+	// Without a choice nothing is sent and AO uses its defaults.
+	hn.must(201, "POST", "/api/cards", map[string]any{"title": "Defaults", "agent": map[string]any{"harness": "codex"}})
+	if req := spawned(); req.Model != "" || req.Effort != "" {
+		t.Fatalf("spawn request = %+v", req)
+	}
+
+	// A wrong model or effort is refused before anything is created.
+	cards := len(hn.must(200, "GET", "/api/cards", nil)["cards"].([]any))
+	count := len(hn.ao.spawned)
+	for name, agent := range map[string]map[string]any{
+		"unknown model":                {"harness": "codex", "model": "gemini-4-neon"},
+		"unsupported effort":           {"harness": "codex", "model": "gpt-6.2-astra", "effort": "medium"},
+		"effort without effort models": {"harness": "copilot", "model": "gemini-4-neon", "effort": "high"},
+	} {
+		if code := hn.errorCode(400, "POST", "/api/cards", map[string]any{"title": "Bad", "agent": agent}); code != "UNKNOWN_MODEL" {
+			t.Errorf("%s: code = %s", name, code)
+		}
+	}
+	if len(hn.ao.spawned) != count || len(hn.must(200, "GET", "/api/cards", nil)["cards"].([]any)) != cards {
+		t.Fatalf("a refused request created a card or a session")
+	}
+
+	// Starting a session from an existing card takes the same fields.
+	plain := hn.must(201, "POST", "/api/cards", map[string]any{"title": "Later"})["card"].(map[string]any)["id"].(string)
+	if code := hn.errorCode(400, "POST", "/api/cards/"+plain+"/session", map[string]any{"harness": "codex", "model": "nope"}); code != "UNKNOWN_MODEL" {
+		t.Errorf("start with an unknown model: code = %s", code)
+	}
+	hn.must(201, "POST", "/api/cards/"+plain+"/session", map[string]any{"harness": "codex", "model": "gpt-6.2-sol", "effort": "low"})
+	if req := spawned(); req.Model != "gpt-6.2-sol" || req.Effort != "low" {
+		t.Fatalf("spawn request = %+v", req)
+	}
+
+	// When the catalog cannot be read the choice is passed on to AO.
+	hn.ao.set(func() { hn.ao.modelsErr = fmt.Errorf("%w: offline", ao.ErrUnavailable) })
+	hn.must(201, "POST", "/api/cards", map[string]any{"title": "Unchecked", "agent": map[string]any{"harness": "codex", "model": "brand-new-model"}})
+	if req := spawned(); req.Model != "brand-new-model" {
+		t.Fatalf("spawn request = %+v", req)
 	}
 }
 

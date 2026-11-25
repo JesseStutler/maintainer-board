@@ -84,8 +84,14 @@ func clearGitHub(c *db.Card) {
 	c.GHCommitCount, c.GHCommentCount, c.GHReviewCommentCount = 0, 0, 0
 	c.GHLabels = db.StringList{}
 	c.GHUpdatedAt, c.GHLastSyncedAt, c.GHError = "", "", ""
+	c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = "", "", false
 	c.AckAt = ""
 	setTracking(c, github.Tracking{})
+}
+
+// isOwn reports whether author is the maintainer running the board.
+func isOwn(author, me string) bool {
+	return me != "" && strings.EqualFold(author, me)
 }
 
 func kindLabel(kind string) string {
@@ -104,6 +110,7 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 		return nil, github.Result{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	me := s.currentUser()
 	var result github.Result
 	card, err := s.store.UpdateCard(ctx, cardID, func(c *db.Card, m *db.Mutation) error {
 		if c.GHRepo != item.Repo || c.GHNumber != item.Number {
@@ -128,6 +135,17 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			UnresolvedThreads: item.UnresolvedThreads,
 		})
 		setTracking(c, result.Track)
+		review := github.EvaluateReview(github.ReviewInput{
+			GitHub:              item.MyReview,
+			StoredState:         c.GHMyReviewState,
+			StoredAt:            c.GHMyReviewedAt,
+			AckHeadSHA:          c.AckHeadSHA,
+			Own:                 isOwn(item.Author, me),
+			Live:                snap,
+			LastCommitAt:        item.LastCommitAt,
+			LastOtherActivityAt: item.LastOtherActivityAt,
+		})
+		c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = review.State, review.At, review.Stale
 		if first {
 			c.AckAt = now
 			m.Event(db.EventGitHub, fmt.Sprintf("Linked %s %s#%d (%s); baseline recorded", kindLabel(item.Kind), item.Repo, item.Number, strings.ToLower(snap.State)))
@@ -336,6 +354,7 @@ func (s *Server) githubLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			s.resolveCurrentUser(ctx)
 			s.syncGitHub(ctx, false)
 			timer.Reset(s.cfg.GitHubSyncInterval)
 		}
@@ -501,6 +520,7 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 	}
 	errNotLinked := errors.New("not linked")
 	errNotSynced := errors.New("not synced")
+	me := s.currentUser()
 	card, err := s.store.UpdateCard(ctx, id, func(c *db.Card, m *db.Mutation) error {
 		if c.GHNumber == 0 {
 			return errNotLinked
@@ -508,9 +528,21 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 		if c.GHLastSyncedAt == "" {
 			return errNotSynced
 		}
+		msg := "Marked reviewed"
+		if c.HasUnreadUpdates {
+			msg = "Marked caught up"
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
 		setTracking(c, github.Ack(liveSnapshot(c)))
-		c.AckAt = time.Now().UTC().Format(time.RFC3339)
-		msg := "Marked caught up"
+		c.AckAt = now
+		if !isOwn(c.GHAuthor, me) {
+			// Acknowledging is a review of the current state. A review
+			// state read from GitHub is kept; only the reference time moves.
+			if c.GHMyReviewState == "" {
+				c.GHMyReviewState = github.MyReviewReviewed
+			}
+			c.GHMyReviewedAt, c.GHIsStaleReview = now, false
+		}
 		if req.MoveToColumnID != "" && req.MoveToColumnID != c.ColumnID {
 			msg += fmt.Sprintf("; moved from %s to %s", cols.title(c.ColumnID), cols.title(req.MoveToColumnID))
 			c.ColumnID = req.MoveToColumnID
@@ -524,6 +556,33 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, errNotSynced):
 		writeError(w, http.StatusConflict, "NOT_SYNCED", "This card has not been synced with GitHub yet. Run Sync Now first.")
+		return
+	case err != nil:
+		s.writeStoreError(w, err)
+		return
+	}
+	s.hub.Publish()
+	writeJSON(w, http.StatusOK, s.view(card))
+}
+
+// handleUnreview removes a review mark the maintainer set by hand. A review
+// read from GitHub cannot be removed here; it would return on the next sync.
+func (s *Server) handleUnreview(w http.ResponseWriter, r *http.Request) {
+	errFromGitHub := errors.New("review comes from github")
+	card, err := s.store.UpdateCard(r.Context(), r.PathValue("id"), func(c *db.Card, m *db.Mutation) error {
+		switch c.GHMyReviewState {
+		case "":
+			return nil
+		case github.MyReviewReviewed:
+			c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = "", "", false
+			m.Event(db.EventAck, "Review mark cleared")
+			return nil
+		}
+		return errFromGitHub
+	})
+	switch {
+	case errors.Is(err, errFromGitHub):
+		writeError(w, http.StatusConflict, "REVIEW_FROM_GITHUB", "This review was submitted on GitHub and cannot be cleared from the board.")
 		return
 	case err != nil:
 		s.writeStoreError(w, err)

@@ -1,13 +1,28 @@
 // Application entry point: wiring of the header, filters, live updates,
 // theme and notifications.
 
-import { debounce, plural, relTime, storageGet, storageSet } from './util.js';
-import { hydrateIcons, setIcon } from './icons.js';
+import { h, debounce, plural, relTime, storageGet, storageSet } from './util.js';
+import { hydrateIcons, setIcon, icon } from './icons.js';
 import { api } from './api.js';
 import { toast, toastError, withBusy, hasModal, closeTopModal } from './ui.js';
-import { state, subscribe, emit, setBoard, setFilter, cards, unreadCount, ghRefLabel } from './state.js';
+import {
+  state,
+  subscribe,
+  emit,
+  setBoard,
+  setFilter,
+  cards,
+  unreadCount,
+  ghRefLabel,
+  currentUser,
+  cardAuthors,
+  AUTHOR_MINE,
+  searchKey,
+  harnessLabel,
+  matchesFilters,
+} from './state.js';
 import { initBoard, renderBoard } from './board.js';
-import { initDrawer, openDrawer, closeDrawer, isDrawerOpen, updateDrawer } from './drawer.js';
+import { initDrawer, openDrawer, closeDrawer, isDrawerOpen, updateDrawer, isDrawerExpanded, setDrawerExpanded, toggleDrawerExpanded } from './drawer.js';
 import { openNewTask, openColumns, openImport } from './modals.js';
 
 const THEME_KEY = 'mb.theme';
@@ -65,7 +80,164 @@ function connectEvents() {
   // EventSource reconnects on its own; the safety poll covers the gap.
 }
 
+// Search
+
+let contentSeq = 0;
+let contentVersion = -1;
+
+/**
+ * Asks the server which cards match the search box through their session
+ * ID or the text of their conversation. The card's own fields are matched
+ * in the browser, so this only adds results; it never delays typing.
+ */
+async function runContentSearch() {
+  const key = searchKey();
+  const seq = ++contentSeq;
+  if (!key) {
+    if (state.search.key) {
+      state.search = { key: '', matches: new Map() };
+      emit();
+    }
+    return;
+  }
+  const version = state.board ? state.board.version : -1;
+  try {
+    const res = await api.get(`/api/search?q=${encodeURIComponent(state.filters.search)}`);
+    if (seq !== contentSeq) return;
+    contentVersion = version;
+    state.search = { key, matches: new Map(res.matches.map((m) => [m.cardId, m])) };
+    emit();
+  } catch (err) {
+    // The local match on card fields still works; try again on the next change.
+  }
+}
+
+const scheduleContentSearch = debounce(runContentSearch, 200);
+
+function clearAISearch() {
+  if (state.ai.status === 'idle') return;
+  state.ai = { status: 'idle', query: '', engine: '', error: '', matches: new Map() };
+}
+
+function clearSearch() {
+  const input = $('search');
+  input.value = '';
+  clearAISearch();
+  setFilter('search', '');
+  runContentSearch();
+}
+
+async function runAISearch() {
+  const input = $('search');
+  const query = input.value.trim();
+  if (!query) {
+    input.focus();
+    toast('Type what you are looking for, then start AI Search.', 'info');
+    return;
+  }
+  if (state.ai.status === 'running') return;
+  const button = $('btn-ai-search');
+  state.ai = { status: 'running', query, engine: '', error: '', matches: new Map() };
+  emit();
+  await withBusy(
+    button,
+    async () => {
+      const res = await api.post('/api/search/ai', { query });
+      // A search that was cleared while it ran is not shown.
+      if (state.ai.status !== 'running' || state.ai.query !== query) return;
+      state.ai = {
+        status: 'done',
+        query: res.query,
+        engine: res.engine,
+        error: '',
+        matches: new Map(res.matches.map((m, i) => [m.cardId, { reason: m.reason, rank: i + 1 }])),
+      };
+    },
+    (err) => {
+      if (state.ai.status === 'running' && state.ai.query === query) {
+        state.ai = { status: 'error', query, engine: '', error: err.message, matches: new Map() };
+      }
+      return true;
+    },
+  );
+  emit();
+}
+
+/** Banner under the filter bar: progress, result or failure of AI Search. */
+function renderSearchBanner() {
+  const banner = $('search-banner');
+  const ai = state.ai;
+  const key = JSON.stringify([ai.status, ai.query, ai.engine, ai.error, ai.matches.size, ai.status === 'done' ? cards().filter((c) => ai.matches.has(c.id) && matchesFilters(c)).length : 0]);
+  if (banner.dataset.key === key) return;
+  banner.dataset.key = key;
+  banner.hidden = ai.status === 'idle';
+  banner.className = `search-banner is-${ai.status}`;
+  if (ai.status === 'idle') {
+    banner.replaceChildren();
+    return;
+  }
+  const clear = (label) =>
+    h(
+      'button',
+      {
+        class: 'btn btn-sm',
+        type: 'button',
+        dataset: { action: 'clear-ai' },
+        onClick: () => {
+          clearAISearch();
+          emit();
+        },
+      },
+      icon('x', 13),
+      h('span', null, label),
+    );
+  const quoted = h('span', { class: 'query' }, `"${ai.query}"`);
+  if (ai.status === 'running') {
+    banner.replaceChildren(icon('loader', 15, 'spin'), h('span', { class: 'banner-text' }, h('strong', null, 'AI Search:'), ' reading the board for ', quoted), h('span', { class: 'spacer' }), clear('Cancel'));
+  } else if (ai.status === 'error') {
+    banner.replaceChildren(icon('x-circle', 15), h('span', { class: 'banner-text' }, h('strong', null, 'AI Search failed:'), ` ${ai.error}`), h('span', { class: 'spacer' }), clear('Dismiss'));
+  } else {
+    const total = ai.matches.size;
+    const shown = cards().filter((c) => ai.matches.has(c.id) && matchesFilters(c)).length;
+    const hidden = total - shown;
+    banner.replaceChildren(
+      icon('sparkles', 15),
+      h('span', { class: 'banner-text' }, h('strong', null, 'AI Search:'), ` ${total} ${total === 1 ? 'match' : 'matches'} for `, quoted),
+      h('span', { class: 'hint' }, `answered by ${harnessLabel(ai.engine)}${hidden > 0 ? `; ${hidden} hidden by the other filters` : ''}`),
+      h('span', { class: 'spacer' }),
+      clear('Clear'),
+    );
+  }
+}
+
 // Header
+
+let authorOptionsKey = '';
+
+/**
+ * Fills the author filter: everyone, the maintainer, then each author that
+ * has a card on the board. A selected author who left the board stays
+ * listed, so an empty board still explains itself.
+ */
+function renderAuthorFilter() {
+  const select = $('filter-author');
+  const me = currentUser();
+  const selected = state.filters.author || '';
+  const authors = cardAuthors();
+  if (selected && selected !== AUTHOR_MINE && !authors.some((a) => a.toLowerCase() === selected.toLowerCase())) authors.push(selected);
+  const key = JSON.stringify([me, authors]);
+  if (key !== authorOptionsKey) {
+    authorOptionsKey = key;
+    const options = [new Option('All Authors', '')];
+    if (me) options.push(new Option(`Mine (@${me})`, AUTHOR_MINE));
+    for (const author of authors) options.push(new Option(`@${author}`, author));
+    select.replaceChildren(...options);
+  }
+  // "Mine" needs a known login; fall back to everyone until it is detected.
+  const value = Array.from(select.options).some((o) => o.value === selected) ? selected : '';
+  if (select.value !== value) select.value = value;
+  select.classList.toggle('is-active', value !== '');
+}
 
 function renderHeader() {
   const board = state.board;
@@ -110,6 +282,14 @@ function renderHeader() {
   const f = state.filters;
   for (const button of $('filter-category').querySelectorAll('button')) button.classList.toggle('active', button.dataset.value === f.category);
   for (const button of $('filter-agent').querySelectorAll('button')) button.classList.toggle('active', button.dataset.value === f.agent);
+  renderAuthorFilter();
+  $('btn-search-clear').hidden = !f.search && state.ai.status === 'idle';
+  renderSearchBanner();
+  // Cards change while a search is active: refresh the server-side matches.
+  if (searchKey() && board.version !== contentVersion) {
+    contentVersion = board.version;
+    scheduleContentSearch();
+  }
   $('toggle-updates').setAttribute('aria-pressed', String(f.updatesOnly));
   $('toggle-done').setAttribute('aria-pressed', String(f.showDone));
   $('toggle-orchestrator').setAttribute('aria-pressed', String(board.settings.showOrchestrator));
@@ -256,19 +436,30 @@ function init() {
   const search = $('search');
   search.addEventListener(
     'input',
-    debounce(() => setFilter('search', search.value), 80),
+    debounce(() => {
+      // Typing a new query leaves the AI result behind.
+      clearAISearch();
+      setFilter('search', search.value);
+      scheduleContentSearch();
+    }, 80),
   );
   search.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       e.stopPropagation();
-      if (search.value) {
-        search.value = '';
-        setFilter('search', '');
+      if (search.value || state.ai.status !== 'idle') clearSearch();
+      else search.blur();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        runAISearch();
       } else {
-        search.blur();
+        setFilter('search', search.value);
+        runContentSearch();
       }
     }
   });
+  $('btn-ai-search').addEventListener('click', runAISearch);
+  $('btn-search-clear').addEventListener('click', clearSearch);
   $('filter-category').addEventListener('click', (e) => {
     const button = e.target.closest('button');
     if (button) setFilter('category', button.dataset.value);
@@ -277,6 +468,7 @@ function init() {
     const button = e.target.closest('button');
     if (button) setFilter('agent', button.dataset.value);
   });
+  $('filter-author').addEventListener('change', (e) => setFilter('author', e.target.value));
   $('toggle-updates').addEventListener('click', () => setFilter('updatesOnly', !state.filters.updatesOnly));
   $('updates-pill').addEventListener('click', () => setFilter('updatesOnly', !state.filters.updatesOnly));
   $('toggle-done').addEventListener('click', () => setFilter('showDone', !state.filters.showDone));
@@ -297,16 +489,23 @@ function init() {
     if (e.key === 'Escape') {
       if (closeTopModal()) return;
       if (isDrawerOpen()) {
+        // One step back at a time: leave the field, then the expanded
+        // workspace, then the card.
         if (isTyping(document.activeElement)) document.activeElement.blur();
+        else if (isDrawerExpanded()) setDrawerExpanded(false);
         else closeDrawer();
       }
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target) || hasModal()) return;
     if (e.key === '/') {
+      if (isDrawerExpanded()) return;
       e.preventDefault();
       search.focus();
       search.select();
+    } else if (e.key === 'f' && isDrawerOpen()) {
+      e.preventDefault();
+      toggleDrawerExpanded();
     } else if (e.key === 'n') {
       e.preventDefault();
       openNewTask({ onCreated: (card) => openDrawer(card.id) });

@@ -5,6 +5,7 @@ import { icon } from './icons.js';
 import { api } from './api.js';
 import { openModal, confirmDialog, toast, toastError, withBusy, segmented, select } from './ui.js';
 import { state, subscribe, emit, CATEGORIES, ROLES, COLOR_PRESETS, columns, cards, columnByRole, harnessLabel } from './state.js';
+import { createModelPicker } from './models.js';
 
 let fieldSeq = 0;
 
@@ -13,7 +14,9 @@ function field(label, control, options = {}) {
     fieldSeq += 1;
     control.id = `field-${fieldSeq}`;
   }
-  return h('div', { class: ['field', options.full && 'full'] }, h('label', { for: control.id }, label), control, options.hint ? h('span', { class: 'hint' }, options.hint) : null);
+  // The hint is plain text, or an element the caller keeps updating.
+  const hint = options.hint instanceof Node ? options.hint : options.hint ? h('span', { class: 'hint' }, options.hint) : null;
+  return h('div', { class: ['field', options.full && 'full'] }, h('label', { for: control.id }, label), control, hint);
 }
 
 // New task
@@ -40,6 +43,16 @@ export function openNewTask({ columnId, onCreated } = {}) {
 
   const promptField = field('Initial prompt', prompt, { full: true });
   const projectField = project ? field('AO project', project) : null;
+  // Model and effort of the new session, loaded for the chosen agent.
+  const picker = createModelPicker({
+    onChange: () => {
+      effortField.hidden = modelField.hidden || !picker.hasEfforts;
+      modelHint.textContent = picker.error ? `The model list is unavailable (${picker.error}); the agent's default is used.` : 'Default lets the agent choose.';
+    },
+  });
+  const modelHint = h('span', { class: 'hint' }, 'Default lets the agent choose.');
+  const modelField = field('Model', picker.model, { hint: modelHint });
+  const effortField = field('Effort', picker.effort, { hint: 'Reasoning effort; higher is slower and more thorough.' });
   const existingField = field('Existing AO session', existing, { full: true, hint: 'Only sessions that are not linked to a card are listed.' });
   const agentHint = h('span', { class: 'hint' });
 
@@ -47,6 +60,9 @@ export function openNewTask({ columnId, onCreated } = {}) {
     const spawning = value === 'copilot' || value === 'codex';
     promptField.hidden = !spawning;
     if (projectField) projectField.hidden = !spawning;
+    modelField.hidden = !spawning;
+    effortField.hidden = !spawning || !picker.hasEfforts;
+    if (spawning && board.ao.connected) picker.load(value);
     existingField.hidden = value !== 'existing';
     if (!board.ao.connected && value !== 'none') agentHint.textContent = 'AO is offline; the session cannot be started right now.';
     else if (spawning) agentHint.textContent = `Starts a new ${harnessLabel(value)} worker session in AO, named after the task.`;
@@ -90,6 +106,8 @@ export function openNewTask({ columnId, onCreated } = {}) {
     field('Category', category),
     field('Column', column),
     h('div', { class: 'field full' }, h('span', { class: 'label' }, 'Agent session'), agent, agentHint),
+    modelField,
+    effortField,
     promptField,
     projectField,
     existingField,
@@ -115,7 +133,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
       return;
     }
     if (agent.value === 'copilot' || agent.value === 'codex') {
-      payload.agent = { harness: agent.value, prompt: prompt.value, projectId: project ? project.value : '' };
+      payload.agent = { harness: agent.value, prompt: prompt.value, projectId: project ? project.value : '', ...picker.value() };
     } else if (agent.value === 'existing') {
       if (!existing.value) {
         error.textContent = 'There is no unlinked AO session to attach. Choose another agent option.';

@@ -50,12 +50,21 @@
     </header>
 
     <div class="filterbar" role="search">
-      <label class="search">
-        <span class="icon" data-icon="search"></span>
-        <input id="search" type="search" autocomplete="off" spellcheck="false"
-          placeholder="Search title, summary, #number, tag, session" aria-label="Search cards">
-        <kbd>/</kbd>
-      </label>
+      <div class="search-group">
+        <label class="search" title="Searches titles, summaries, notes, #numbers, @authors, tags, AO session IDs and the text of session conversations">
+          <span class="icon" data-icon="search"></span>
+          <input id="search" type="search" autocomplete="off" spellcheck="false"
+            placeholder="Search cards, session ID, chat text" aria-label="Search cards">
+          <kbd>/</kbd>
+        </label>
+        <button id="btn-ai-search" class="btn btn-ai" type="button"
+          title="AI Search: let the local AI find cards by meaning, including what was said in their conversations (Ctrl+Enter in the search box)">
+          <span class="icon" data-icon="sparkles"></span><span>AI Search</span>
+        </button>
+        <button id="btn-search-clear" class="btn btn-ghost" type="button" hidden title="Clear the search">
+          <span class="icon" data-icon="x"></span><span>Clear</span>
+        </button>
+      </div>
       <div id="filter-category" class="segmented" role="group" aria-label="Category filter">
         <button type="button" data-value="" class="active">All</button>
         <button type="button" data-value="PR_REVIEW">PR Review</button>
@@ -69,6 +78,12 @@
         <button type="button" data-value="copilot">Copilot</button>
         <button type="button" data-value="codex">Codex</button>
       </div>
+      <label class="filter-select" title="Show only cards whose pull request or issue was opened by this author">
+        <span class="icon" data-icon="user"></span>
+        <select id="filter-author" class="select" aria-label="Author filter">
+          <option value="">All Authors</option>
+        </select>
+      </label>
       <div class="toggles">
         <button id="toggle-updates" class="toggle" type="button" aria-pressed="false">Updates Only</button>
         <button id="toggle-done" class="toggle" type="button" aria-pressed="true">Show Done</button>
@@ -77,6 +92,8 @@
       </div>
       <span id="card-count" class="card-count mono"></span>
     </div>
+
+    <div id="search-banner" class="search-banner" role="status" hidden></div>
 
     <main id="board" class="board" aria-label="Kanban board">
       <div class="board-loading">Loading board</div>

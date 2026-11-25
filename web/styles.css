@@ -9,10 +9,16 @@
   --radius-sm: 4px;
   --radius: 6px;
   --radius-lg: 10px;
-  --topbar-h: 52px;
-  --filterbar-h: 46px;
-  --column-w: 250px;
-  --drawer-w: 680px;
+  --topbar-h: 56px;
+  --filterbar-h: 50px;
+  /* Wide enough for 14.5px titles and a full status strip on one card. */
+  --column-w: clamp(328px, 21vw, 340px);
+  /* Preferred drawer width; app code overrides it after a manual resize. */
+  --drawer-w: min(780px, 60vw);
+  /* Effective width: never under 520px or over 92% of the viewport. */
+  --drawer-eff: min(100vw, clamp(520px, var(--drawer-w), 92vw));
+  --rail-w: 340px;
+  --reading-w: 900px;
   --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
@@ -53,6 +59,13 @@
   --code-bg: rgba(110, 118, 129, 0.2);
   --user-msg-bg: rgba(56, 139, 253, 0.09);
   --user-msg-border: rgba(56, 139, 253, 0.28);
+  --you: #2dd4bf;
+  --you-subtle: rgba(45, 212, 191, 0.13);
+  --you-border: rgba(45, 212, 191, 0.42);
+  --brand-copilot: #8ea2ff;
+  --brand-copilot-subtle: rgba(142, 162, 255, 0.14);
+  --brand-codex: #34d399;
+  --brand-codex-subtle: rgba(52, 211, 153, 0.13);
 }
 
 [data-theme="light"] {
@@ -91,6 +104,13 @@
   --code-bg: rgba(129, 139, 152, 0.16);
   --user-msg-bg: rgba(9, 105, 218, 0.06);
   --user-msg-border: rgba(9, 105, 218, 0.22);
+  --you: #0f766e;
+  --you-subtle: rgba(13, 148, 136, 0.11);
+  --you-border: rgba(13, 148, 136, 0.42);
+  --brand-copilot: #4f46e5;
+  --brand-copilot-subtle: rgba(79, 70, 229, 0.09);
+  --brand-codex: #0d9488;
+  --brand-codex-subtle: rgba(13, 148, 136, 0.1);
 }
 
 *,
@@ -109,7 +129,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -153,7 +173,7 @@ a:hover {
 
 .mono {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   font-variant-ligatures: none;
 }
 
@@ -215,8 +235,16 @@ a:hover {
   min-width: 0;
 }
 
+/* In a narrow window the left side is clipped instead of sliding under the
+   buttons on the right. */
 .topbar-left {
+  flex: 0 1 auto;
   gap: 10px;
+  overflow: hidden;
+}
+
+.topbar-right {
+  flex: none;
 }
 
 .brand-mark {
@@ -224,8 +252,8 @@ a:hover {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: var(--radius);
   background: var(--accent-subtle);
   color: var(--accent);
@@ -234,7 +262,7 @@ a:hover {
 
 .brand {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -242,7 +270,7 @@ a:hover {
 
 .topbar-sep {
   width: 1px;
-  height: 18px;
+  height: 20px;
   background: var(--border);
   flex: none;
 }
@@ -260,13 +288,13 @@ a:hover {
   justify-content: center;
   gap: 6px;
   flex: none;
-  height: 30px;
-  padding: 0 11px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--raised);
   color: var(--text);
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -353,18 +381,18 @@ a.btn:hover {
 }
 
 .btn-sm {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 12px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
 }
 
 .btn-icon {
-  width: 30px;
+  width: 32px;
   padding: 0;
 }
 
 .btn-icon.btn-sm {
-  width: 26px;
+  width: 28px;
 }
 
 .btn-icon[aria-pressed="true"] {
@@ -380,13 +408,13 @@ a.btn:hover {
   align-items: center;
   gap: 6px;
   flex: none;
-  height: 22px;
-  padding: 0 9px;
+  height: 24px;
+  padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -401,8 +429,8 @@ a.btn:hover {
 }
 
 .dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--text-subtle);
   flex: none;
@@ -456,20 +484,28 @@ a.btn:hover {
   border-color: var(--border-muted);
 }
 
+/* Teal marks the maintainer's own review, apart from the green of approvals. */
+.pill-you {
+  color: var(--you);
+  border-color: var(--you-border);
+  background: var(--you-subtle);
+  font-weight: 600;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   flex: none;
-  height: 18px;
+  height: 20px;
   padding: 0 6px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-muted);
   background: var(--neutral-subtle);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.045em;
+  letter-spacing: 0.025em;
   text-transform: uppercase;
   line-height: 1;
   white-space: nowrap;
@@ -514,14 +550,14 @@ a.btn:hover {
 .badge-harness {
   text-transform: none;
   letter-spacing: 0;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   gap: 5px;
 }
 
 .state-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex: none;
   background: var(--text-subtle);
@@ -565,24 +601,23 @@ a.btn:hover {
 .filterbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   flex: none;
-  height: var(--filterbar-h);
-  padding: 0 16px;
+  padding: 8px 16px;
   background: var(--bg);
   border-bottom: 1px solid var(--border-muted);
-  overflow-x: auto;
-  scrollbar-width: none;
+  min-height: var(--filterbar-h);
+  flex-wrap: wrap;
 }
 
 .search {
   position: relative;
   display: flex;
   align-items: center;
-  flex: 0 1 320px;
-  min-width: 200px;
-  height: 28px;
-  padding: 0 8px;
+  flex: 1 1 200px;
+  min-width: 180px;
+  height: 32px;
+  padding: 0 9px;
   gap: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -602,7 +637,7 @@ a.btn:hover {
   outline: 0;
   background: transparent;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 
 .search input::placeholder {
@@ -613,19 +648,81 @@ a.btn:hover {
   appearance: none;
 }
 
+/* Search box with its AI Search and Clear buttons; they wrap as one unit. */
+.search-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 400px;
+  min-width: 320px;
+  max-width: 560px;
+}
+
+.btn-ai {
+  color: var(--merged);
+  border-color: color-mix(in srgb, var(--merged) 42%, transparent);
+  background: var(--merged-subtle);
+  box-shadow: none;
+}
+
+.btn-ai:hover:not(:disabled) {
+  background: var(--merged-subtle);
+  border-color: var(--merged);
+  filter: brightness(1.08);
+}
+
+/* Progress, result or failure of an AI search, above the board. */
+.search-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  min-height: 42px;
+  padding: 6px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--merged) 30%, transparent);
+  background: var(--merged-subtle);
+  font-size: 13.5px;
+}
+
+body.drawer-open .search-banner {
+  padding-right: calc(var(--drawer-eff) + 16px);
+}
+
+.search-banner > .icon {
+  color: var(--merged);
+}
+
+.search-banner .banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.search-banner .query {
+  font-weight: 600;
+}
+
+.search-banner.is-error {
+  border-bottom-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: var(--danger-subtle);
+}
+
+.search-banner.is-error > .icon {
+  color: var(--danger);
+}
+
 kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
+  min-width: 20px;
+  height: 20px;
   padding: 0 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11.5px;
   line-height: 1;
 }
 
@@ -640,13 +737,13 @@ kbd {
 }
 
 .segmented button {
-  height: 22px;
-  padding: 0 9px;
+  height: 26px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -669,17 +766,50 @@ kbd {
   gap: 6px;
 }
 
+.filter-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--text-subtle);
+}
+
+.filter-select > .icon {
+  position: absolute;
+  left: 10px;
+  pointer-events: none;
+}
+
+.filter-select .select {
+  max-width: 230px;
+  padding-left: 30px;
+  background-color: var(--surface);
+  border-color: var(--border-muted);
+  color: var(--text-muted);
+}
+
+.filter-select .select:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.filter-select .select.is-active {
+  color: var(--text);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
 .toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
-  padding: 0 10px 0 8px;
+  height: 30px;
+  padding: 0 12px 0 10px;
   border: 1px solid var(--border-muted);
   border-radius: 999px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -723,7 +853,7 @@ kbd {
   margin-left: auto;
   flex: none;
   color: var(--text-subtle);
-  font-size: 11.5px;
+  font-size: 12.5px;
   white-space: nowrap;
 }
 
@@ -733,7 +863,7 @@ kbd {
   display: flex;
   flex: 1;
   align-items: stretch;
-  gap: 12px;
+  gap: 14px;
   min-height: 0;
   padding: 14px 16px 16px;
   overflow-x: auto;
@@ -741,7 +871,7 @@ kbd {
 }
 
 body.drawer-open .board {
-  padding-right: calc(min(var(--drawer-w), 100vw) + 16px);
+  padding-right: calc(var(--drawer-eff) + 16px);
 }
 
 .board-loading,
@@ -755,7 +885,7 @@ body.drawer-open .board {
   display: flex;
   flex-direction: column;
   flex: 1 0 var(--column-w);
-  max-width: 380px;
+  max-width: 420px;
   min-height: 0;
   border: 1px solid var(--border-muted);
   border-radius: var(--radius-lg);
@@ -773,8 +903,8 @@ body.drawer-open .board {
   align-items: center;
   gap: 8px;
   flex: none;
-  height: 40px;
-  padding: 0 8px 0 12px;
+  height: 44px;
+  padding: 0 8px 0 14px;
   border-bottom: 1px solid var(--border-muted);
 }
 
@@ -788,32 +918,34 @@ body.drawer-open .board {
 }
 
 .column-title {
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  margin: 0;
 }
 
 .column-count {
   flex: none;
-  padding: 1px 7px;
+  padding: 1px 8px;
   border-radius: 999px;
   background: var(--neutral-subtle);
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
+  font-weight: 600;
 }
 
 .column-body {
   display: flex;
   flex-direction: column;
   flex: 1;
-  gap: 8px;
+  gap: 10px;
   min-height: 0;
-  padding: 8px;
+  padding: 10px;
   overflow-y: auto;
 }
 
@@ -822,11 +954,11 @@ body.drawer-open .board {
   align-items: center;
   justify-content: center;
   flex: none;
-  height: 64px;
+  height: 72px;
   border: 1px dashed var(--border);
   border-radius: var(--radius);
   color: var(--text-subtle);
-  font-size: 12px;
+  font-size: 13px;
   pointer-events: none;
 }
 
@@ -847,10 +979,10 @@ body.drawer-open .board {
   display: flex;
   flex-direction: column;
   flex: none;
-  gap: 6px;
-  padding: 10px 11px;
+  gap: 8px;
+  padding: 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 8px;
   background: var(--raised);
   box-shadow: var(--shadow-sm);
   cursor: pointer;
@@ -883,44 +1015,102 @@ body.drawer-open .board {
   bottom: -1px;
   left: -1px;
   width: 3px;
-  border-radius: var(--radius) 0 0 var(--radius);
+  border-radius: 8px 0 0 8px;
   background: var(--warning);
 }
+
+/* Top row: category, linked item with its state, author. */
 
 .card-top {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
 }
 
-.gh-ref {
+/* Linked item and its state as one two-part pill: "PR #6247 | OPEN". */
+.gh-pill {
+  --gh-tone: var(--text-muted);
+  display: inline-flex;
+  align-items: stretch;
+  flex: none;
+  height: 20px;
+  border: 1px solid color-mix(in srgb, var(--gh-tone) 38%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--gh-tone);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.gh-pill.state-OPEN {
+  --gh-tone: var(--success);
+}
+
+.gh-pill.state-MERGED {
+  --gh-tone: var(--merged);
+}
+
+.gh-pill.state-CLOSED {
+  --gh-tone: var(--danger);
+}
+
+.gh-ref,
+.gh-state {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  padding: 0 6px;
+}
+
+.gh-ref {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.gh-state {
+  background: color-mix(in srgb, var(--gh-tone) 15%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--gh-tone) 38%, transparent);
+  letter-spacing: 0.03em;
+}
+
+.card-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
   color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.card-author .login {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.gh-ref.state-OPEN {
-  color: var(--success);
+.card-author.is-mine .login {
+  color: var(--text);
 }
 
-.gh-ref.state-MERGED {
-  color: var(--merged);
-}
-
-.gh-ref.state-CLOSED {
-  color: var(--danger);
+.badge-mine {
+  color: var(--you);
+  background: var(--you-subtle);
+  border-color: var(--you-border);
 }
 
 .card-title {
   margin: 0;
-  font-size: 13px;
-  font-weight: 550;
-  line-height: 1.4;
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.38;
+  letter-spacing: -0.003em;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -932,36 +1122,98 @@ body.drawer-open .board {
 .card-summary {
   margin: 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
+}
+
+/* Status strip: review decision, own review, CI, activity counts. */
+
+.card-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 6px;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-muted);
+  border-radius: 999px;
+  background: var(--neutral-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chip-success {
+  color: var(--success);
+  background: var(--success-subtle);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+}
+
+.chip-danger {
+  color: var(--danger);
+  background: var(--danger-subtle);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.chip-warning {
+  color: var(--warning-text);
+  background: var(--warning-subtle);
+  border-color: var(--warning-border);
+}
+
+.chip-merged {
+  color: var(--merged);
+  background: var(--merged-subtle);
+  border-color: color-mix(in srgb, var(--merged) 35%, transparent);
+}
+
+.chip-you {
+  color: var(--you);
+  background: var(--you-subtle);
+  border-color: var(--you-border);
+}
+
+/* The maintainer's own review is the chip to notice first. */
+.chip-mine {
+  font-weight: 600;
+}
+
+.card-counts {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-ligatures: none;
+  white-space: nowrap;
 }
 
 .card-update {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 7px;
+  padding: 5px 9px;
   border: 1px solid var(--warning-border);
   border-radius: var(--radius-sm);
   background: var(--warning-subtle);
   color: var(--warning-text);
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 600;
   min-width: 0;
-}
-
-.card-update .cycles {
-  flex: none;
-  padding-right: 6px;
-  border-right: 1px solid var(--warning-border);
-  font-family: var(--font-mono);
-  font-size: 11px;
 }
 
 .card-update .text {
@@ -970,14 +1222,127 @@ body.drawer-open .board {
   white-space: nowrap;
 }
 
-.card-meta {
+.card-update .cycles {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Why a card matches the current search when its face does not show it. */
+.card-match {
+  --match-tone: var(--accent);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--match-tone) 30%, transparent);
+  border-left: 3px solid var(--match-tone);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--match-tone) 9%, transparent);
+  font-size: 12.5px;
+  line-height: 1.42;
+}
+
+.card-match .label {
+  flex: none;
+  color: var(--match-tone);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.card-match .text {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.card-match.is-ai {
+  --match-tone: var(--merged);
+}
+
+/* A match on the session ID is a small badge, not a full strip. */
+.card-match.is-id {
+  --match-tone: var(--text-muted);
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-left-width: 1px;
+  font-size: 12px;
+}
+
+.card-match.is-id .text {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+.card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* Footer: agent on the left, last activity on the right. */
+
+.card-foot {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 5px 8px;
-  color: var(--text-subtle);
-  font-size: 11px;
+  gap: 8px;
   min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-muted);
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.agent-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding-left: 7px;
+  border-left: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.brand-icon {
+  color: var(--text-muted);
+}
+
+.brand-copilot {
+  color: var(--brand-copilot);
+}
+
+.brand-codex {
+  color: var(--brand-codex);
+}
+
+.card-time {
+  flex: none;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .meta-item {
@@ -1007,14 +1372,14 @@ body.drawer-open .board {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 18px;
-  padding: 0 7px;
+  height: 22px;
+  padding: 0 8px;
   border-radius: 999px;
   background: var(--neutral-subtle);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
-  max-width: 160px;
+  max-width: 180px;
 }
 
 .tag > span {
@@ -1036,7 +1401,7 @@ body.drawer-open .board {
   color: var(--danger);
 }
 
-/* Drawer */
+/* Drawer and workspace */
 
 .drawer {
   position: fixed;
@@ -1046,11 +1411,14 @@ body.drawer-open .board {
   z-index: 41;
   display: flex;
   flex-direction: column;
-  width: min(var(--drawer-w), 100vw);
+  width: var(--drawer-eff);
   background: var(--surface);
   border-left: 1px solid var(--border);
   box-shadow: var(--shadow-lg);
   animation: slide-in 0.2s var(--ease);
+  /* Lets the header and section buttons adapt to the drawer's own width. */
+  container-type: inline-size;
+  container-name: drawer;
 }
 
 @keyframes slide-in {
@@ -1070,36 +1438,162 @@ body.drawer-open .board {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -4px;
-  width: 8px;
+  left: -6px;
+  width: 12px;
   cursor: col-resize;
   z-index: 2;
+  touch-action: none;
+  outline: 0;
 }
 
-.drawer-resize:hover::after,
-.drawer-resize.is-active::after {
+/* Hairline along the whole edge, shown while hovering or dragging. */
+.drawer-resize::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 3px;
+  left: 5px;
   width: 2px;
+  background: transparent;
+  transition: background 0.12s var(--ease);
+}
+
+/* Grip in the middle of the edge that says "drag me". */
+.drawer-resize::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 6px;
+  height: 48px;
+  margin-top: -24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--raised);
+  box-shadow: var(--shadow-sm);
+  transition: background 0.12s var(--ease), border-color 0.12s var(--ease);
+  z-index: 1;
+}
+
+.drawer-resize:hover::after,
+.drawer-resize:focus-visible::after,
+.drawer-resize.is-active::after {
   background: var(--accent);
 }
 
+.drawer-resize:hover::before,
+.drawer-resize:focus-visible::before,
+.drawer-resize.is-active::before {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing .drawer {
+  animation: none;
+}
+
+/* The header wraps to a second row rather than squeezing its controls. */
 .drawer-top {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   flex: none;
-  height: 48px;
-  padding: 0 12px 0 16px;
+  min-height: 52px;
+  padding: 10px 12px 10px 16px;
   border-bottom: 1px solid var(--border-muted);
 }
 
-.select {
+.drawer-top .select {
+  flex: none;
+}
+
+/* Agent mark, name and AO session ID of the card. */
+.drawer-session {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
   height: 28px;
-  padding: 0 26px 0 9px;
+  padding: 0 10px;
+  border: 1px solid var(--border-muted);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.session-harness {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.drawer-session .session-id {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.drawer-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.control {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.drawer-top .control-label {
+  display: none;
+}
+
+/* Header buttons lose their label before the header has to wrap. */
+@container drawer (max-width: 900px) {
+  .drawer-top .btn-collapsible .btn-label {
+    display: none;
+  }
+
+  .drawer-top .btn-collapsible {
+    width: 28px;
+    padding: 0;
+  }
+}
+
+@container drawer (max-width: 700px) {
+  .drawer-top .switch-label,
+  .drawer-session .session-harness {
+    display: none;
+  }
+}
+
+.drawer-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.drawer-main {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.select {
+  height: 30px;
+  padding: 0 28px 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background-color: var(--raised);
@@ -1109,7 +1603,7 @@ body.drawer-open .board {
   background-size: 4px 4px, 4px 4px;
   background-repeat: no-repeat;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 500;
   appearance: none;
   cursor: pointer;
@@ -1126,6 +1620,27 @@ body.drawer-open .board {
   color: var(--text);
 }
 
+/* Compact select for toolbars, such as the model picker of the composer. */
+.select-sm {
+  height: 26px;
+  max-width: 200px;
+  padding: 0 24px 0 8px;
+  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+  font-size: 12.5px;
+}
+
+.select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .switch {
   position: relative;
   display: inline-flex;
@@ -1133,7 +1648,7 @@ body.drawer-open .board {
   gap: 7px;
   flex: none;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   user-select: none;
@@ -1148,8 +1663,8 @@ body.drawer-open .board {
 
 .switch .track {
   position: relative;
-  width: 28px;
-  height: 16px;
+  width: 30px;
+  height: 18px;
   border-radius: 999px;
   background: var(--border);
   transition: background 0.15s var(--ease);
@@ -1160,8 +1675,8 @@ body.drawer-open .board {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #ffffff;
   transition: transform 0.15s var(--ease);
@@ -1184,33 +1699,153 @@ body.drawer-open .board {
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px 4px;
-}
-
-.drawer.has-chat .drawer-details {
-  flex: 0 0 auto;
-  max-height: 46%;
-  border-bottom: 1px solid var(--border);
-}
-
-.drawer.has-chat.details-collapsed .drawer-details {
-  display: none;
+  padding: 16px 18px 6px;
+  container-type: inline-size;
+  container-name: details;
 }
 
 .drawer:not(.has-chat) .drawer-details {
   flex: 1 1 auto;
 }
 
+/* Side drawer with a conversation: the details are a compact panel on top,
+   so the chat keeps most of the height. Every section folds to one line. */
+.drawer.has-chat .drawer-details {
+  flex: 0 0 auto;
+  max-height: min(40%, 360px);
+  padding: 12px 18px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drawer.has-chat .title-input {
+  margin-bottom: 6px;
+  font-size: 16px;
+}
+
+.drawer.has-chat .tag-row {
+  margin-bottom: 8px;
+}
+
+.drawer.has-chat .section {
+  margin-bottom: 8px;
+}
+
+/* A folded section is a single line; keep the lines close together. */
+.drawer.has-chat .section:has(> .section-head.is-collapsed),
+.drawer.has-chat details.section:not([open]) {
+  margin-bottom: 2px;
+}
+
+.drawer.has-chat:not(.is-expanded).details-collapsed .drawer-details {
+  display: none;
+}
+
+/* Expanded workspace: full width, context rail on the left, conversation in
+   a centered reading column on the right. */
+.drawer.is-expanded {
+  left: 0;
+  width: 100vw;
+  border-left: 0;
+  box-shadow: none;
+  animation: fade-in 0.16s var(--ease);
+}
+
+.drawer.is-expanded .drawer-resize {
+  display: none;
+}
+
+.drawer.is-expanded .drawer-top {
+  padding: 10px 16px;
+}
+
+/* "Back to Board" leads the header of the expanded workspace. */
+.drawer.is-expanded .drawer-close {
+  order: -1;
+  margin-right: 4px;
+  color: var(--text);
+}
+
+.drawer.is-expanded .drawer-body {
+  flex-direction: row;
+}
+
+.drawer.is-expanded.has-chat .drawer-details {
+  flex: 0 0 var(--rail-w);
+  width: var(--rail-w);
+  max-height: none;
+  padding: 16px 16px 6px;
+  border-right: 1px solid var(--border);
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--surface) 55%, var(--bg));
+}
+
+.drawer.is-expanded.has-chat.rail-collapsed .drawer-details {
+  display: none;
+}
+
+.drawer.is-expanded:not(.has-chat) .drawer-details {
+  padding: 24px max(24px, calc((100% - var(--reading-w)) / 2)) 12px;
+}
+
+.drawer.is-expanded .session-bar {
+  padding: 6px 20px;
+}
+
+.drawer.is-expanded .session-alerts,
+.drawer.is-expanded .composer {
+  padding-right: max(24px, calc((100% - var(--reading-w)) / 2));
+  padding-left: max(24px, calc((100% - var(--reading-w)) / 2));
+}
+
+.drawer.is-expanded .chat-scroll {
+  padding: 20px max(24px, calc((100% - var(--reading-w)) / 2)) 24px;
+}
+
+.drawer.is-expanded .jump-latest {
+  right: max(26px, calc((100% - var(--reading-w)) / 2 + 2px));
+}
+
+/* Controls section of the context rail (expanded workspace only). */
+.controls-panel {
+  padding: 12px;
+}
+
+.controls-panel .drawer-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.controls-panel .control {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.controls-panel .control-label {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.controls-panel .select {
+  width: 100%;
+}
+
+.controls-panel .switch {
+  justify-self: start;
+}
+
 .title-input {
   display: block;
   width: calc(100% + 12px);
-  margin: 0 0 8px -6px;
+  margin: 0 0 10px -6px;
   padding: 3px 6px;
   border: 1px solid transparent;
   border-radius: var(--radius);
   background: transparent;
   color: var(--text);
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
   line-height: 1.35;
   resize: none;
@@ -1236,14 +1871,14 @@ body.drawer-open .board {
 }
 
 .tag-input {
-  width: 96px;
-  height: 20px;
-  padding: 0 7px;
+  width: 104px;
+  height: 22px;
+  padding: 0 8px;
   border: 1px dashed var(--border);
   border-radius: 999px;
   background: transparent;
   color: var(--text);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .tag-input:focus {
@@ -1260,17 +1895,83 @@ body.drawer-open .board {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 26px;
+  min-height: 28px;
   margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.section-head.is-collapsed {
+  flex-wrap: nowrap;
+  margin-bottom: 0;
 }
 
 .section-title {
   margin: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.section-heading {
+  flex: none;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  margin-left: -5px;
+  padding: 0 7px 0 3px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.section-toggle:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.section-toggle:hover .section-title {
+  color: var(--text);
+}
+
+/* One-line preview shown in place of the content of a folded section. */
+.section-peek {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.section-peek.is-warning {
+  color: var(--warning-text);
+  font-weight: 500;
+}
+
+/* In the narrow context rail the wordy section buttons become icons. */
+@container details (max-width: 440px) {
+  .section-head .btn-collapsible .btn-label {
+    display: none;
+  }
+
+  .section-head .btn-collapsible {
+    width: 28px;
+    padding: 0;
+  }
 }
 
 .panel {
@@ -1281,9 +1982,9 @@ body.drawer-open .board {
 
 .summary-text {
   margin: 0;
-  padding: 9px 11px;
-  font-size: 13px;
-  line-height: 1.55;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.6;
   white-space: pre-line;
   overflow-wrap: anywhere;
 }
@@ -1302,17 +2003,17 @@ body.drawer-open .board {
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
 .input {
-  height: 30px;
-  padding: 0 9px;
+  height: 32px;
+  padding: 0 10px;
 }
 
 .textarea {
-  min-height: 68px;
+  min-height: 76px;
   resize: vertical;
 }
 
@@ -1338,11 +2039,11 @@ body.drawer-open .board {
 
 .hint {
   color: var(--text-subtle);
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 
 .notes-view {
-  padding: 9px 11px;
+  padding: 10px 12px;
   min-height: 36px;
 }
 
@@ -1356,13 +2057,13 @@ body.drawer-open .board {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px 8px;
-  padding: 9px 11px;
+  padding: 10px 12px;
 }
 
 .gh-title {
   flex: 1 1 100%;
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   overflow-wrap: anywhere;
 }
@@ -1372,10 +2073,10 @@ body.drawer-open .board {
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 14px;
-  padding: 7px 11px;
+  padding: 8px 12px;
   border-top: 1px solid var(--border-muted);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .gh-stats .meta-item {
@@ -1386,14 +2087,33 @@ body.drawer-open .board {
   color: var(--text);
 }
 
+/* The maintainer's own review, below the overall state of the item. */
+.gh-review {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-muted);
+}
+
+.gh-review-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .alert {
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  padding: 9px 11px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 
 .alert > .icon {
@@ -1465,28 +2185,28 @@ body.drawer-open .board {
 .timeline li {
   display: flex;
   gap: 10px;
-  padding: 4px 11px;
-  font-size: 12px;
+  padding: 4px 12px;
+  font-size: 13px;
 }
 
 .timeline time {
   flex: none;
-  width: 92px;
+  width: 104px;
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 18px;
+  font-size: 12px;
+  line-height: 20px;
 }
 
 .timeline .kind {
   flex: none;
-  width: 58px;
+  width: 68px;
   color: var(--text-subtle);
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  line-height: 18px;
+  line-height: 20px;
 }
 
 .timeline .text {
@@ -1499,7 +2219,7 @@ details.section > summary {
   gap: 6px;
   min-height: 26px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -1527,15 +2247,10 @@ details.section[open] > summary .icon {
   align-items: center;
   gap: 8px;
   flex: none;
-  min-height: 42px;
-  padding: 6px 12px 6px 16px;
+  min-height: 46px;
+  padding: 6px 12px 6px 18px;
   border-bottom: 1px solid var(--border-muted);
   background: var(--surface);
-}
-
-.session-id {
-  color: var(--text);
-  font-weight: 600;
 }
 
 .session-activity {
@@ -1544,7 +2259,7 @@ details.section[open] > summary .icon {
   gap: 6px;
   flex: none;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
 }
 
@@ -1563,17 +2278,43 @@ details.section[open] > summary .icon {
   white-space: nowrap;
 }
 
-.session-note {
+.session-info {
+  display: inline-flex;
   flex: none;
-  padding: 5px 16px;
-  border-bottom: 1px solid var(--border-muted);
   color: var(--text-subtle);
-  font-size: 11.5px;
+  cursor: help;
+}
+
+.session-info:hover {
+  color: var(--text-muted);
+}
+
+/* Model configured for the next turn, shown in the session bar. */
+.session-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-muted);
+  border-radius: 999px;
+  background: var(--neutral-subtle);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.session-model .effort {
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+  color: var(--text-subtle);
 }
 
 .session-alerts {
   flex: none;
-  padding: 0 16px;
+  padding: 0 18px;
 }
 
 .session-alerts .alert {
@@ -1592,7 +2333,7 @@ details.section[open] > summary .icon {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 16px 16px;
+  padding: 16px 18px 18px;
   overflow-anchor: none;
 }
 
@@ -1609,21 +2350,21 @@ details.section[open] > summary .icon {
 }
 
 .msg {
-  margin-bottom: 14px;
+  margin-bottom: 18px;
 }
 
 .msg-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   color: var(--text-subtle);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .msg-role {
   color: var(--text-muted);
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -1637,8 +2378,18 @@ details.section[open] > summary .icon {
   overflow-wrap: anywhere;
 }
 
+/* Conversation text is set larger and looser than the rest of the UI. */
+.msg-body .md {
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+
+.msg-head .brand-icon {
+  margin-right: -2px;
+}
+
 .msg-user .msg-body {
-  padding: 8px 11px;
+  padding: 10px 13px;
   border: 1px solid var(--user-msg-border);
   border-radius: var(--radius);
   background: var(--user-msg-bg);
@@ -1669,10 +2420,10 @@ details.section[open] > summary .icon {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: 0 0 8px;
+  margin: 0 0 9px;
   padding: 2px 0;
   color: var(--text-subtle);
-  font-size: 11.5px;
+  font-size: 12.5px;
   min-width: 0;
 }
 
@@ -1685,7 +2436,7 @@ details.section[open] > summary .icon {
 .activity .status {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .activity.is-failed {
@@ -1702,7 +2453,7 @@ details.section[open] > summary .icon {
   align-items: center;
   gap: 8px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .jump-latest {
@@ -1714,7 +2465,7 @@ details.section[open] > summary .icon {
 
 .composer {
   flex: none;
-  padding: 10px 16px 12px;
+  padding: 12px 18px 14px;
   border-top: 1px solid var(--border-muted);
   background: var(--surface);
 }
@@ -1733,15 +2484,15 @@ details.section[open] > summary .icon {
 .composer textarea {
   display: block;
   width: 100%;
-  min-height: 58px;
-  max-height: 220px;
-  padding: 8px 10px;
+  min-height: 64px;
+  max-height: 260px;
+  padding: 10px 12px;
   border: 0;
   outline: 0;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.55;
   resize: none;
 }
 
@@ -1753,8 +2504,22 @@ details.section[open] > summary .icon {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 7px 9px;
   border-top: 1px solid var(--border-muted);
+}
+
+.model-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* In a narrow drawer the keyboard hint gives way to the model picker. */
+@container drawer (max-width: 640px) {
+  .composer-hint {
+    display: none;
+  }
 }
 
 .start-session {
@@ -1773,7 +2538,7 @@ details.section[open] > summary .icon {
 /* Markdown */
 
 .md {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -1806,21 +2571,21 @@ details.section[open] > summary .icon {
 }
 
 .md h1 {
-  font-size: 17px;
+  font-size: 19px;
 }
 
 .md h2 {
-  font-size: 15.5px;
+  font-size: 17px;
 }
 
 .md h3 {
-  font-size: 14px;
+  font-size: 15.5px;
 }
 
 .md h4,
 .md h5,
 .md h6 {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .md ul,
@@ -1865,7 +2630,7 @@ details.section[open] > summary .icon {
   border-radius: var(--radius-sm);
   background: var(--code-bg);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .md .code-block {
@@ -1880,26 +2645,26 @@ details.section[open] > summary .icon {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 26px;
+  height: 28px;
   padding: 0 4px 0 10px;
   border-bottom: 1px solid var(--border-muted);
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .md .code-copy {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 20px;
+  height: 22px;
   padding: 0 6px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -1910,11 +2675,11 @@ details.section[open] > summary .icon {
 
 .md pre {
   margin: 0;
-  padding: 9px 11px;
+  padding: 10px 12px;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.55;
   tab-size: 4;
 }
 
@@ -1931,7 +2696,7 @@ details.section[open] > summary .icon {
 
 .md table {
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 
 .md th,
@@ -1969,7 +2734,7 @@ details.section[open] > summary .icon {
 .modal {
   display: flex;
   flex-direction: column;
-  width: min(560px, 100%);
+  width: min(600px, 100%);
   max-height: 84vh;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1979,11 +2744,11 @@ details.section[open] > summary .icon {
 }
 
 .modal.modal-wide {
-  width: min(940px, 100%);
+  width: min(1040px, 100%);
 }
 
 .modal.modal-narrow {
-  width: min(430px, 100%);
+  width: min(470px, 100%);
 }
 
 @keyframes modal-in {
@@ -1998,20 +2763,20 @@ details.section[open] > summary .icon {
   align-items: center;
   gap: 10px;
   flex: none;
-  padding: 11px 12px 11px 18px;
+  padding: 13px 12px 13px 20px;
   border-bottom: 1px solid var(--border-muted);
 }
 
 .modal-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
 }
 
 .modal-body {
   flex: 1;
   min-height: 0;
-  padding: 16px 18px;
+  padding: 18px 20px;
   overflow-y: auto;
 }
 
@@ -2020,7 +2785,7 @@ details.section[open] > summary .icon {
   align-items: center;
   gap: 8px;
   flex: none;
-  padding: 12px 18px;
+  padding: 13px 20px;
   border-top: 1px solid var(--border-muted);
 }
 
@@ -2044,13 +2809,13 @@ details.section[open] > summary .icon {
 .field > label,
 .field > .label {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
 }
 
 .field .select {
   width: 100%;
-  height: 30px;
+  height: 32px;
 }
 
 .field .segmented {
@@ -2059,7 +2824,7 @@ details.section[open] > summary .icon {
 
 .field-error {
   color: var(--danger);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .modal-text {
@@ -2085,7 +2850,7 @@ details.section[open] > summary .icon {
 
 .col-row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 168px auto;
+  grid-template-columns: 30px minmax(0, 1fr) 184px auto;
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
@@ -2108,8 +2873,8 @@ details.section[open] > summary .icon {
 }
 
 .color-input {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -2154,10 +2919,10 @@ details.section[open] > summary .icon {
 
 .import-row {
   display: grid;
-  grid-template-columns: 18px 66px minmax(0, 1fr) 160px 48px 78px;
+  grid-template-columns: 18px 84px minmax(0, 1fr) 176px 54px 92px;
   align-items: center;
   gap: 10px;
-  padding: 7px 11px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-muted);
   cursor: pointer;
 }
@@ -2172,7 +2937,7 @@ details.section[open] > summary .icon {
 
 .import-row.is-head {
   color: var(--text-subtle);
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -2214,7 +2979,7 @@ details.section[open] > summary .icon {
 
 .import-when {
   color: var(--text-subtle);
-  font-size: 11.5px;
+  font-size: 12.5px;
   text-align: right;
   white-space: nowrap;
 }
@@ -2235,7 +3000,7 @@ details.section[open] > summary .icon {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(380px, calc(100vw - 32px));
+  width: min(420px, calc(100vw - 32px));
   pointer-events: none;
 }
 
@@ -2243,13 +3008,13 @@ details.section[open] > summary .icon {
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  padding: 10px 10px 10px 12px;
+  padding: 11px 11px 11px 13px;
   border: 1px solid var(--border);
   border-left-width: 3px;
   border-radius: var(--radius);
   background: var(--overlay);
   box-shadow: var(--shadow-lg);
-  font-size: 12.5px;
+  font-size: 13.5px;
   pointer-events: auto;
   animation: toast-in 0.18s var(--ease);
 }
@@ -2318,13 +3083,13 @@ details.section[open] > summary .icon {
   color: var(--text);
 }
 
-@media (max-width: 1240px) {
+@media (max-width: 1360px) {
   .topbar .btn:not(.btn-primary):not(.btn-icon) > span:not(.icon) {
     display: none;
   }
 
   .topbar .btn:not(.btn-primary):not(.btn-icon) {
-    width: 30px;
+    width: 32px;
     padding: 0;
   }
 

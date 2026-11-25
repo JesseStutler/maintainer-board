@@ -48,7 +48,9 @@ type boardSettings struct {
 }
 
 type boardView struct {
-	Version     int64         `json:"version"`
+	Version int64 `json:"version"`
+	// CurrentUser is the GitHub login of the maintainer, or "" when unknown.
+	CurrentUser string        `json:"currentUser"`
 	Columns     []db.Column   `json:"columns"`
 	Cards       []cardView    `json:"cards"`
 	AO          aoStatus      `json:"ao"`
@@ -78,6 +80,35 @@ func (s *Server) view(c *db.Card) cardView {
 		v.SessionMissing = true
 	}
 	return v
+}
+
+// currentUser returns the GitHub login of the maintainer, or "".
+func (s *Server) currentUser() string {
+	if s.cfg.CurrentUser != "" {
+		return s.cfg.CurrentUser
+	}
+	if r, ok := s.gh.(userResolver); ok {
+		return r.User()
+	}
+	return ""
+}
+
+// resolveCurrentUser retries the login detection that failed at startup,
+// for example because the machine was offline.
+func (s *Server) resolveCurrentUser(ctx context.Context) {
+	if s.currentUser() != "" {
+		return
+	}
+	r, ok := s.gh.(userResolver)
+	if !ok {
+		return
+	}
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if login, err := r.DetectUser(dctx); err == nil {
+		s.log.Info("github user detected", "login", login)
+		s.hub.Publish()
+	}
 }
 
 func (s *Server) showOrchestrator(ctx context.Context) bool {
@@ -112,9 +143,10 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := boardView{
-		Version: version,
-		Columns: cols,
-		Cards:   make([]cardView, 0, len(cards)),
+		Version:     version,
+		CurrentUser: s.currentUser(),
+		Columns:     cols,
+		Cards:       make([]cardView, 0, len(cards)),
 		Settings: boardSettings{
 			ShowOrchestrator: s.showOrchestrator(ctx),
 			DefaultRepo:      s.cfg.DefaultRepo,
@@ -306,6 +338,10 @@ type agentRequest struct {
 	Harness   string `json:"harness"`
 	Prompt    string `json:"prompt"`
 	ProjectID string `json:"projectId"`
+	// Model and Effort choose the model and reasoning effort of the new
+	// session; empty means the agent's default.
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
 }
 
 type createCardRequest struct {
@@ -319,6 +355,9 @@ type createCardRequest struct {
 	GitHubRef   string        `json:"githubRef"`
 	AOSessionID string        `json:"aoSessionId"`
 	Agent       *agentRequest `json:"agent"`
+	// Model and Effort are a shorthand for the fields of Agent.
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
 }
 
 type cardResponse struct {
@@ -346,6 +385,19 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		}
 		if !validHarness(req.Agent.Harness) {
 			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Agent must be copilot or codex.")
+			return
+		}
+		if req.Agent.Model == "" {
+			req.Agent.Model = req.Model
+		}
+		if req.Agent.Effort == "" {
+			req.Agent.Effort = req.Effort
+		}
+		req.Agent.Model, req.Agent.Effort = strings.TrimSpace(req.Agent.Model), strings.TrimSpace(req.Agent.Effort)
+		// Checked before the card exists, so a typo does not leave a card
+		// behind without its session.
+		if err := s.validateSpawnModel(ctx, *req.Agent); err != nil {
+			writeError(w, http.StatusBadRequest, "UNKNOWN_MODEL", capitalize(strings.TrimPrefix(err.Error(), errUnknownModel.Error()+": "))+".")
 			return
 		}
 	}

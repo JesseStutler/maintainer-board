@@ -23,12 +23,20 @@ export const ROLES = [
 export const COLOR_PRESETS = ['#6e7681', '#3b82f6', '#a855f7', '#f59e0b', '#10b981', '#52525b', '#ef4444', '#ec4899', '#14b8a6'];
 
 const FILTER_KEY = 'mb.filters';
-const DEFAULT_FILTERS = { search: '', category: '', agent: '', updatesOnly: false, showDone: true };
+const DEFAULT_FILTERS = { search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true };
+
+/** Value of the author filter that selects the maintainer's own items. */
+export const AUTHOR_MINE = '@me';
 
 export const state = {
   board: null,
   filters: { ...DEFAULT_FILTERS, ...storageGet(FILTER_KEY, {}), search: '' },
   selectedCardId: null,
+  // Server-side search result for the query identified by `key`: cards
+  // found through their session ID or conversation text.
+  search: { key: '', matches: new Map() },
+  // AI search: status is "idle", "running", "done" or "error".
+  ai: { status: 'idle', query: '', engine: '', error: '', matches: new Map() },
   // True until the first successful board load; used to suppress
   // notifications for updates that predate this page view.
   firstLoad: true,
@@ -95,7 +103,7 @@ export function activityInfo(card) {
   const session = card.session;
   if (!session) return { label: 'Unavailable', cls: 'is-missing' };
   if (session.isTerminated) return { label: 'Terminated', cls: 'is-terminated' };
-  if (session.needsResume) return { label: 'Not Resumed', cls: 'is-resume' };
+  if (session.needsResume) return { label: 'Resume needed', cls: 'is-resume' };
   switch (session.activity && session.activity.state) {
     case 'active':
       return { label: 'Working', cls: 'is-active' };
@@ -151,27 +159,105 @@ export function ghIconName(card) {
 export function ciInfo(status) {
   switch (status) {
     case 'SUCCESS':
-      return { label: 'CI passing', short: 'CI', cls: 'pill-success', tone: 'is-success', icon: 'check-circle' };
+      return { label: 'CI Passing', cls: 'pill-success', tone: 'is-success', icon: 'check-circle', title: 'Every check passed' };
     case 'FAILURE':
-      return { label: 'CI failing', short: 'CI', cls: 'pill-danger', tone: 'is-danger', icon: 'x-circle' };
+      return { label: 'CI Failing', cls: 'pill-danger', tone: 'is-danger', icon: 'x-circle', title: 'At least one check failed' };
     case 'PENDING':
-      return { label: 'CI running', short: 'CI', cls: 'pill-warning', tone: 'is-warning', icon: 'clock' };
+      return { label: 'CI Pending', cls: 'pill-warning', tone: 'is-warning', icon: 'clock', title: 'Checks are still running' };
     default:
       return null;
   }
 }
 
+/** The review decision of the pull request as a whole. */
 export function reviewInfo(decision) {
   switch (decision) {
     case 'APPROVED':
-      return { label: 'Approved', cls: 'pill-success', tone: 'is-success', icon: 'check' };
+      return { label: 'Approved', short: 'Approved', cls: 'pill-success', tone: 'is-success', icon: 'check', title: 'Review decision: approved' };
     case 'CHANGES_REQUESTED':
-      return { label: 'Changes requested', cls: 'pill-danger', tone: 'is-danger', icon: 'alert' };
+      return { label: 'Changes Requested', short: 'Changes Req', cls: 'pill-danger', tone: 'is-danger', icon: 'alert', title: 'Review decision: a reviewer requested changes' };
     case 'REVIEW_REQUIRED':
-      return { label: 'Review required', cls: 'pill-muted', tone: '', icon: 'user' };
+      return { label: 'Review Required', short: 'Review Required', cls: 'pill-muted', tone: '', icon: 'user', title: 'Review decision: an approving review is still required' };
     default:
       return null;
   }
+}
+
+/** GitHub login of the maintainer running the board, or ''. */
+export function currentUser() {
+  return (state.board && state.board.currentUser) || '';
+}
+
+/** True when the linked pull request or issue was written by the maintainer. */
+export function isMine(card) {
+  const me = currentUser();
+  return Boolean(me && card.ghAuthor && card.ghAuthor.toLowerCase() === me.toLowerCase());
+}
+
+const MY_REVIEW_LABELS = {
+  APPROVED: 'Approved',
+  LGTM: 'LGTM',
+  CHANGES_REQUESTED: 'Changes Req',
+  COMMENTED: 'Commented',
+  REVIEWED: 'Reviewed',
+};
+
+const MY_REVIEW_DETAIL = {
+  APPROVED: 'You approved this on GitHub',
+  LGTM: 'You gave /lgtm on GitHub',
+  CHANGES_REQUESTED: 'You requested changes on GitHub',
+  COMMENTED: 'You left a review on GitHub',
+  REVIEWED: 'You marked this reviewed on the board',
+};
+
+/**
+ * Where the maintainer personally stands on the linked item, which is not
+ * the same as the overall review decision. `kind` is "current" (reviewed and
+ * nothing changed since), "stale" (changed after the review), "none" (an
+ * open pull request of somebody else that was not reviewed yet), or the
+ * function returns null when there is nothing to say.
+ */
+export function myReviewInfo(card) {
+  if (!card.ghNumber || !card.ghLastSyncedAt || isMine(card)) return null;
+  const state = card.ghMyReviewState;
+  const finished = card.ghState === 'MERGED' || card.ghState === 'CLOSED';
+  if (state) {
+    const name = MY_REVIEW_LABELS[state] || state;
+    const detail = MY_REVIEW_DETAIL[state] || 'You reviewed this';
+    if (card.ghIsStaleReview && !finished) {
+      return {
+        kind: 'stale',
+        label: 'Re-review needed',
+        cls: 'pill-warning',
+        tone: 'is-warning',
+        icon: 'refresh',
+        title: `${detail}, and it was updated afterwards: new commits or new replies. Your last look: ${name}.`,
+      };
+    }
+    return { kind: 'current', label: `You: ${name}`, cls: 'pill-you', tone: 'is-you', icon: 'check', title: `${detail}. Nothing changed since.` };
+  }
+  if (card.ghKind === 'pr' && card.ghState === 'OPEN' && currentUser()) {
+    return { kind: 'none', label: 'Not reviewed', cls: 'pill-muted', tone: '', icon: 'eye', title: 'You have not reviewed this pull request yet' };
+  }
+  return null;
+}
+
+/** Distinct authors of the linked items on the board, sorted by name. */
+export function cardAuthors() {
+  const seen = new Map();
+  for (const card of cards()) {
+    if (!card.ghAuthor || hiddenOrchestrator(card)) continue;
+    const key = card.ghAuthor.toLowerCase();
+    if (!seen.has(key)) seen.set(key, card.ghAuthor);
+  }
+  return Array.from(seen.values()).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+
+function matchesAuthor(card, author) {
+  if (!author) return true;
+  // Without a known login "Mine" cannot be decided, so it does not filter.
+  if (author === AUTHOR_MINE) return !currentUser() || isMine(card);
+  return Boolean(card.ghAuthor) && card.ghAuthor.toLowerCase() === author.toLowerCase();
 }
 
 /** Cards auto-created for orchestrator sessions are hidden unless enabled. */
@@ -180,25 +266,95 @@ function hiddenOrchestrator(card) {
   return card.origin === 'ao' && card.session && card.session.kind === 'orchestrator';
 }
 
-function matchesSearch(card, tokens) {
-  if (tokens.length === 0) return true;
-  const haystack = [
+/** Lower-cased terms of the search box; every one has to match. */
+export function searchTokens() {
+  return state.filters.search.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+/** Identifies a search by its terms, so results are tied to their query. */
+export function searchKey() {
+  return searchTokens().join(' ');
+}
+
+/**
+ * The searchable text of a card itself. The AO session ID and the session
+ * branch are matched separately, the ID first: AO puts the ID into the
+ * branch name, and a search for it should be reported as a match on the ID.
+ */
+function cardHaystack(card) {
+  return [
     card.title,
     card.summary,
     card.notes,
     card.ghTitle,
-    card.ghAuthor,
+    card.ghAuthor ? `${card.ghAuthor} @${card.ghAuthor}` : '',
     card.ghRepo,
     card.ghNumber ? `#${card.ghNumber} ${card.ghNumber}` : '',
-    card.aoSessionId,
     categoryLabel(card.category),
     (card.tags || []).join(' '),
     (card.ghLabels || []).join(' '),
-    card.session ? `${card.session.harness} ${card.session.branch || ''}` : '',
   ]
     .join('\n')
     .toLowerCase();
-  return tokens.every((token) => haystack.includes(token));
+}
+
+function sessionHaystack(card) {
+  return card.session ? `${card.session.harness} ${card.session.branch || ''}`.toLowerCase() : '';
+}
+
+/**
+ * Matches the card's own fields and its AO session ID. The ID is no longer
+ * printed on the card face but stays searchable, in full or in part.
+ */
+function matchesSearch(card, tokens) {
+  if (tokens.length === 0) return true;
+  const haystack = `${cardHaystack(card)}\n${sessionHaystack(card)}`;
+  const id = (card.aoSessionId || '').toLowerCase();
+  return tokens.every((token) => haystack.includes(token) || (id !== '' && id.includes(token)));
+}
+
+/** The server's match for this card and the current query, or null. */
+function contentMatch(card) {
+  const result = state.search;
+  if (!result.key || result.key !== searchKey()) return null;
+  return result.matches.get(card.id) || null;
+}
+
+/** True while the board shows the result of an AI search. */
+export function aiSearchActive() {
+  return state.ai.status === 'done';
+}
+
+/**
+ * Why a card is shown for the current search, when the card face alone
+ * does not explain it: an AI match with its reason, a match on the hidden
+ * session ID, or a match inside the session conversation. Returns a list of
+ * { kind, label, text } entries, usually empty.
+ */
+export function searchMatches(card) {
+  if (aiSearchActive()) {
+    const match = state.ai.matches.get(card.id);
+    return match ? [{ kind: 'ai', label: 'AI Match', text: match.reason, rank: match.rank }] : [];
+  }
+  const tokens = searchTokens();
+  if (tokens.length === 0) return [];
+  const out = [];
+  if (card.aoSessionId) {
+    // Computed here rather than taken from the server so that the badge
+    // appears with the first keystroke.
+    const id = card.aoSessionId.toLowerCase();
+    const haystack = cardHaystack(card);
+    if (tokens.some((token) => id.includes(token) && !haystack.includes(token))) {
+      out.push({ kind: 'id', label: 'Matched ID', text: card.aoSessionId });
+    }
+  }
+  const server = contentMatch(card);
+  if (server && server.matchedBy.includes('conversation') && server.snippet) {
+    const who = server.role === 'user' ? 'you' : server.role === 'assistant' ? 'the agent' : server.role;
+    const count = server.messages > 1 ? `${server.messages} messages` : '1 message';
+    out.push({ kind: 'chat', label: 'In chat', text: server.snippet, title: `Found in the session conversation (${count}); the newest is from ${who}` });
+  }
+  return out;
 }
 
 export function matchesFilters(card) {
@@ -206,9 +362,12 @@ export function matchesFilters(card) {
   if (hiddenOrchestrator(card)) return false;
   if (f.category && card.category !== f.category) return false;
   if (f.agent && (!card.session || card.session.harness !== f.agent)) return false;
+  if (!matchesAuthor(card, f.author)) return false;
   if (f.updatesOnly && !card.hasUnreadUpdates) return false;
-  const tokens = f.search.toLowerCase().split(/\s+/).filter(Boolean);
-  return matchesSearch(card, tokens);
+  // An AI search result replaces the keyword search until it is cleared.
+  if (aiSearchActive()) return state.ai.matches.has(card.id);
+  if (matchesSearch(card, searchTokens())) return true;
+  return contentMatch(card) !== null;
 }
 
 export function visibleColumns() {

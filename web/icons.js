@@ -102,6 +102,33 @@ const ICONS = {
     P('M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z'),
   ],
   panel: [R(3, 3, 18, 18, 2), P('M3 9h18')],
+  'panel-left': [R(3, 3, 18, 18, 2), P('M9 3v18')],
+  'panel-right': [R(3, 3, 18, 18, 2), P('M15 3v18')],
+  maximize: [P('M15 3h6v6'), P('m21 3-7 7'), P('m3 21 7-7'), P('M9 21H3v-6')],
+  minimize: [P('m14 10 7-7'), P('M20 10h-6V4'), P('m3 21 7-7'), P('M4 14h6v6')],
+  'arrow-left': [P('m12 19-7-7 7-7'), P('M19 12H5')],
+  eye: [P('M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0'), C(12, 12, 3)],
+};
+
+// Filled brand marks of the agent harnesses, drawn in the harness accent
+// color. The Copilot mark is the "copilot" icon of GitHub Octicons (MIT
+// license); the Codex mark is the OpenAI logo as published by Simple Icons
+// (CC0). Both names and marks belong to their owners and are used here only
+// to label sessions of those products.
+const BRANDS = {
+  copilot: {
+    viewBox: '0 0 16 16',
+    paths: [
+      'M7.998 15.035c-4.562 0-7.873-2.914-7.998-3.749V9.338c.085-.628.677-1.686 1.588-2.065.013-.07.024-.143.036-.218.029-.183.06-.384.126-.612-.201-.508-.254-1.084-.254-1.656 0-.87.128-1.769.693-2.484.579-.733 1.494-1.124 2.724-1.261 1.206-.134 2.262.034 2.944.765.05.053.096.108.139.165.044-.057.094-.112.143-.165.682-.731 1.738-.899 2.944-.765 1.23.137 2.145.528 2.724 1.261.566.715.693 1.614.693 2.484 0 .572-.053 1.148-.254 1.656.066.228.098.429.126.612.012.076.024.148.037.218.924.385 1.522 1.471 1.591 2.095v1.872c0 .766-3.351 3.795-8.002 3.795Zm0-1.485c2.28 0 4.584-1.11 5.002-1.433V7.862l-.023-.116c-.49.21-1.075.291-1.727.291-1.146 0-2.059-.327-2.71-.991A3.222 3.222 0 0 1 8 6.303a3.24 3.24 0 0 1-.544.743c-.65.664-1.563.991-2.71.991-.652 0-1.236-.081-1.727-.291l-.023.116v4.255c.419.323 2.722 1.433 5.002 1.433ZM6.762 2.83c-.193-.206-.637-.413-1.682-.297-1.019.113-1.479.404-1.713.7-.247.312-.369.789-.369 1.554 0 .793.129 1.171.308 1.371.162.181.519.379 1.442.379.853 0 1.339-.235 1.638-.54.315-.322.527-.827.617-1.553.117-.935-.037-1.395-.241-1.614Zm4.155-.297c-1.044-.116-1.488.091-1.681.297-.204.219-.359.679-.242 1.614.091.726.303 1.231.618 1.553.299.305.784.54 1.638.54.922 0 1.28-.198 1.442-.379.179-.2.308-.578.308-1.371 0-.765-.123-1.242-.37-1.554-.233-.296-.693-.587-1.713-.7Z',
+      'M6.25 9.037a.75.75 0 0 1 .75.75v1.501a.75.75 0 0 1-1.5 0V9.787a.75.75 0 0 1 .75-.75Zm4.25.75v1.501a.75.75 0 0 1-1.5 0V9.787a.75.75 0 0 1 1.5 0Z',
+    ],
+  },
+  codex: {
+    viewBox: '0 0 24 24',
+    paths: [
+      'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z',
+    ],
+  },
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -129,6 +156,37 @@ export function icon(name, size = 14, extraClass = '') {
   }
   const span = document.createElement('span');
   span.className = extraClass ? `icon ${extraClass}` : 'icon';
+  span.appendChild(svg);
+  return span;
+}
+
+/**
+ * Returns the brand mark of an agent harness ("copilot" or "codex") as a
+ * <span class="icon brand-icon brand-NAME">. Any other harness gets a neutral
+ * terminal glyph, so a new agent type still renders something sensible.
+ */
+export function brandIcon(harness, size = 15) {
+  const brand = Object.prototype.hasOwnProperty.call(BRANDS, harness) ? BRANDS[harness] : null;
+  if (!brand) {
+    const fallback = icon('terminal', size, 'brand-icon brand-other');
+    fallback.dataset.brand = 'other';
+    return fallback;
+  }
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', brand.viewBox);
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('fill', 'currentColor');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (const d of brand.paths) {
+    const node = document.createElementNS(SVG_NS, 'path');
+    node.setAttribute('d', d);
+    svg.appendChild(node);
+  }
+  const span = document.createElement('span');
+  span.className = `icon brand-icon brand-${harness}`;
+  span.dataset.brand = harness;
   span.appendChild(svg);
   return span;
 }

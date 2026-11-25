@@ -37,6 +37,9 @@ type AOClient interface {
 	ImportCandidates(ctx context.Context) ([]ao.ImportCandidate, error)
 	Import(ctx context.Context, ids []string) ([]ao.ImportResult, error)
 	Events(ctx context.Context, lastEventID string, fn func(ao.Event)) error
+	AgentModels(ctx context.Context, agent string) (*ao.AgentModels, error)
+	ConversationModels(ctx context.Context, sessionID string) (*ao.ConversationModels, error)
+	UpdateConversationSettings(ctx context.Context, sessionID string, settings ao.ConversationTurnSettings) (*ao.ConversationSettings, error)
 }
 
 // GitHubClient fetches the live state of a pull request or issue.
@@ -44,9 +47,18 @@ type GitHubClient interface {
 	Fetch(ctx context.Context, repo string, number int, knownKind string) (*github.Item, error)
 }
 
-// Summarizer produces an AI summary and names the engine that wrote it.
+// userResolver is implemented by GitHub clients that know, or can find out,
+// which account they act as.
+type userResolver interface {
+	User() string
+	DetectUser(ctx context.Context) (string, error)
+}
+
+// Summarizer runs the local AI CLIs: it writes card summaries and answers
+// semantic searches, and names the engine that produced the result.
 type Summarizer interface {
 	Summarize(ctx context.Context, in summary.Input) (text, engine string, err error)
+	Search(ctx context.Context, in summary.SearchInput) (matches []summary.SearchMatch, engine string, err error)
 }
 
 type Config struct {
@@ -63,6 +75,9 @@ type Config struct {
 	AOSyncInterval time.Duration
 	// AllowedHosts lists extra Host header values accepted besides loopback.
 	AllowedHosts []string
+	// CurrentUser is the GitHub login of the maintainer. Empty means the
+	// GitHub client is asked, which detects it through gh.
+	CurrentUser string
 }
 
 type Server struct {
@@ -95,6 +110,12 @@ type Server struct {
 	ghSyncDone     chan struct{}
 	ghLastReport   SyncReport
 	aoSyncRequests chan struct{}
+
+	// index tracks the local conversation index; indexRequests wakes the
+	// loop that keeps it current.
+	index         contentIndex
+	indexRequests chan struct{}
+	aiSearchMu    sync.Mutex
 
 	bg sync.WaitGroup
 	// bgCtx is cancelled on shutdown; background work started by handlers
@@ -129,6 +150,8 @@ func New(cfg Config, store *db.Store, aoClient AOClient, gh GitHubClient, ai Sum
 		sessions:       map[string]ao.Session{},
 		summaryStamp:   map[string]summaryMark{},
 		aoSyncRequests: make(chan struct{}, 1),
+		index:          contentIndex{seen: map[string]indexMark{}},
+		indexRequests:  make(chan struct{}, 1),
 		bgCtx:          context.Background(),
 	}
 }
@@ -137,10 +160,14 @@ func New(cfg Config, store *db.Store, aoClient AOClient, gh GitHubClient, ai Sum
 // Wait blocks until they have finished.
 func (s *Server) Start(ctx context.Context) {
 	s.bgCtx = ctx
-	s.bg.Add(3)
+	s.bg.Add(4)
 	go func() {
 		defer s.bg.Done()
 		s.aoLoop(ctx)
+	}()
+	go func() {
+		defer s.bg.Done()
+		s.contentIndexLoop(ctx)
 	}()
 	go func() {
 		defer s.bg.Done()
@@ -191,10 +218,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/cards/{id}/unlink-github", s.handleUnlinkGitHub)
 	mux.HandleFunc("POST /api/cards/{id}/sync-github", s.handleSyncCardGitHub)
 	mux.HandleFunc("POST /api/cards/{id}/ack", s.handleAck)
+	mux.HandleFunc("POST /api/cards/{id}/unreview", s.handleUnreview)
 	mux.HandleFunc("POST /api/cards/{id}/summarize", s.handleSummarize)
 	mux.HandleFunc("POST /api/cards/{id}/session", s.handleStartSession)
+	mux.HandleFunc("GET /api/cards/{id}/models", s.handleCardModels)
+	mux.HandleFunc("PATCH /api/cards/{id}/settings", s.handleCardSettings)
+
+	mux.HandleFunc("GET /api/ao/agents/{agent}/models", s.handleAgentModels)
 
 	mux.HandleFunc("POST /api/github/sync", s.handleGitHubSync)
+
+	mux.HandleFunc("GET /api/search", s.handleSearch)
+	mux.HandleFunc("POST /api/search/ai", s.handleAISearch)
 
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("PATCH /api/sessions/{id}", s.handleRenameSession)

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,14 @@ type Item struct {
 	// UnresolvedThreads is the number of unresolved review threads, or -1
 	// when it was not queried.
 	UnresolvedThreads int
+	// MyReview is the current user's own review. It stays empty when the
+	// user is unknown or wrote the item.
+	MyReview MyReview
+	// LastCommitAt is the commit time of the newest commit of a pull request.
+	LastCommitAt string
+	// LastOtherActivityAt is the time of the newest comment or review by a
+	// person other than the current user; bots do not count.
+	LastOtherActivityAt string
 }
 
 // Runner executes gh with args and returns its standard output.
@@ -48,6 +57,53 @@ type Client struct {
 	IgnoreContexts map[string]bool
 	// ProwLabels treats the "lgtm" plus "approved" label pair as an approval.
 	ProwLabels bool
+
+	userMu sync.RWMutex
+	user   string
+}
+
+// User returns the GitHub login whose reviews are reported as "yours", or
+// "" when it is not known.
+func (c *Client) User() string {
+	c.userMu.RLock()
+	defer c.userMu.RUnlock()
+	return c.user
+}
+
+// SetUser sets the login returned by User.
+func (c *Client) SetUser(login string) {
+	c.userMu.Lock()
+	c.user = strings.TrimPrefix(strings.TrimSpace(login), "@")
+	c.userMu.Unlock()
+}
+
+// DetectUser asks gh which account it is authenticated as and remembers it.
+func (c *Client) DetectUser(ctx context.Context) (string, error) {
+	out, err := c.run(ctx, "api", "user", "--jq", ".login")
+	if err != nil {
+		return "", err
+	}
+	login := strings.TrimSpace(string(out))
+	if !ValidLogin(login) {
+		return "", fmt.Errorf("%w: gh api user returned no login", ErrUnavailable)
+	}
+	c.SetUser(login)
+	return login, nil
+}
+
+// ValidLogin accepts the characters GitHub allows in a login, plus the
+// "[bot]" suffix of app accounts.
+func ValidLogin(login string) bool {
+	login = strings.TrimSuffix(login, "[bot]")
+	if login == "" || len(login) > 100 {
+		return false
+	}
+	for _, r := range login {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // NewClient returns a client that shells out to the gh binary.
@@ -161,7 +217,7 @@ func (c *Client) Fetch(ctx context.Context, repo string, number int, knownKind s
 		if err != nil {
 			return nil, err
 		}
-		item, err := parseIssueView(out)
+		item, err := c.parseIssueView(out)
 		if err != nil {
 			return nil, err
 		}
@@ -211,23 +267,20 @@ type ghCheck struct {
 }
 
 type ghPRView struct {
-	Number         int               `json:"number"`
-	State          string            `json:"state"`
-	IsDraft        bool              `json:"isDraft"`
-	ReviewDecision string            `json:"reviewDecision"`
-	Commits        []json.RawMessage `json:"commits"`
-	Comments       []json.RawMessage `json:"comments"`
-	Reviews        []struct {
-		State string `json:"state"`
-		Body  string `json:"body"`
-	} `json:"reviews"`
-	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
-	HeadRefOid        string    `json:"headRefOid"`
-	UpdatedAt         string    `json:"updatedAt"`
-	Title             string    `json:"title"`
-	URL               string    `json:"url"`
-	Author            ghAuthor  `json:"author"`
-	Labels            []ghLabel `json:"labels"`
+	Number            int         `json:"number"`
+	State             string      `json:"state"`
+	IsDraft           bool        `json:"isDraft"`
+	ReviewDecision    string      `json:"reviewDecision"`
+	Commits           []ghCommit  `json:"commits"`
+	Comments          []ghComment `json:"comments"`
+	Reviews           []ghReview  `json:"reviews"`
+	StatusCheckRollup []ghCheck   `json:"statusCheckRollup"`
+	HeadRefOid        string      `json:"headRefOid"`
+	UpdatedAt         string      `json:"updatedAt"`
+	Title             string      `json:"title"`
+	URL               string      `json:"url"`
+	Author            ghAuthor    `json:"author"`
+	Labels            []ghLabel   `json:"labels"`
 }
 
 type ghPRRest struct {
@@ -310,19 +363,25 @@ func (c *Client) parsePR(view, rest []byte) (*Item, error) {
 		ReviewComments: r.ReviewComments + reviewBodies,
 		UpdatedAt:      v.UpdatedAt,
 	}
+	user := c.User()
+	if !sameUser(item.Author, user) {
+		item.MyReview = myReview(user, v.Reviews, v.Comments)
+	}
+	item.LastCommitAt = lastCommitTime(v.Commits)
+	item.LastOtherActivityAt = lastOtherActivity(user, v.Reviews, v.Comments)
 	return item, nil
 }
 
-func parseIssueView(data []byte) (*Item, error) {
+func (c *Client) parseIssueView(data []byte) (*Item, error) {
 	var v struct {
-		Number    int               `json:"number"`
-		State     string            `json:"state"`
-		Title     string            `json:"title"`
-		URL       string            `json:"url"`
-		Author    ghAuthor          `json:"author"`
-		Comments  []json.RawMessage `json:"comments"`
-		UpdatedAt string            `json:"updatedAt"`
-		Labels    []ghLabel         `json:"labels"`
+		Number    int         `json:"number"`
+		State     string      `json:"state"`
+		Title     string      `json:"title"`
+		URL       string      `json:"url"`
+		Author    ghAuthor    `json:"author"`
+		Comments  []ghComment `json:"comments"`
+		UpdatedAt string      `json:"updatedAt"`
+		Labels    []ghLabel   `json:"labels"`
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, fmt.Errorf("decode gh issue view: %w", err)
@@ -347,6 +406,7 @@ func parseIssueView(data []byte) (*Item, error) {
 			Comments:  len(v.Comments),
 			UpdatedAt: v.UpdatedAt,
 		},
+		LastOtherActivityAt: lastOtherActivity(c.User(), nil, v.Comments),
 	}, nil
 }
 

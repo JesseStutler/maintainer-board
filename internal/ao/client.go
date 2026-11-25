@@ -214,6 +214,43 @@ func (c *Client) Rename(ctx context.Context, sessionID, displayName string) erro
 	return c.do(ctx, http.MethodPatch, sessionPath(sessionID, ""), map[string]string{"displayName": displayName}, nil)
 }
 
+// AgentModels returns the models an agent ("copilot" or "codex") offers.
+func (c *Client) AgentModels(ctx context.Context, agent string) (*AgentModels, error) {
+	var out AgentModels
+	if err := c.do(ctx, http.MethodGet, "/api/v1/agents/"+url.PathEscape(agent)+"/models", nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Models == nil {
+		out.Models = []AgentModel{}
+	}
+	return &out, nil
+}
+
+// ConversationModels returns the models a session can switch to and the
+// settings currently selected for its next turn.
+func (c *Client) ConversationModels(ctx context.Context, sessionID string) (*ConversationModels, error) {
+	var out ConversationModels
+	if err := c.do(ctx, http.MethodGet, sessionPath(sessionID, "/conversation/models"), nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Models == nil {
+		out.Models = []ConversationModel{}
+	}
+	return &out, nil
+}
+
+// UpdateConversationSettings changes the model, reasoning effort or
+// approval mode a session uses from its next turn on, and returns the
+// settings AO reports afterwards. AO does not check that the model exists;
+// callers validate it against AgentModels or ConversationModels first.
+func (c *Client) UpdateConversationSettings(ctx context.Context, sessionID string, settings ConversationTurnSettings) (*ConversationSettings, error) {
+	var out ConversationSettings
+	if err := c.do(ctx, http.MethodPatch, sessionPath(sessionID, "/conversation/settings"), settings, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) ImportCandidates(ctx context.Context) ([]ImportCandidate, error) {
 	var out struct {
 		Candidates []ImportCandidate `json:"candidates"`

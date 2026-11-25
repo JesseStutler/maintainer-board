@@ -182,6 +182,75 @@ INSERT INTO columns (id, title, position, color, role) VALUES
 	('ready',       'Ready',       4, '#10b981', 'ready'),
 	('done',        'Done',        5, '#52525b', 'done');
 `,
+	// 2: personal review columns on cards; see migrationSteps.
+	"",
+	// 3: text of the AO session conversations, kept locally so that the
+	// board search also finds what was said in a chat. folded is the
+	// lower-cased text the search runs on.
+	`
+CREATE TABLE IF NOT EXISTS content_index (
+	session_id TEXT NOT NULL,
+	message_id TEXT NOT NULL,
+	sequence   INTEGER NOT NULL DEFAULT 0,
+	role       TEXT NOT NULL DEFAULT '',
+	text       TEXT NOT NULL,
+	folded     TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (session_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_content_index_session ON content_index(session_id, sequence);
+
+CREATE TABLE IF NOT EXISTS content_index_state (
+	session_id    TEXT PRIMARY KEY,
+	last_sequence INTEGER NOT NULL DEFAULT 0,
+	stamp         TEXT NOT NULL DEFAULT '',
+	updated_at    TEXT NOT NULL
+);
+`,
+}
+
+// columnDef is a column added to an existing table by a migration.
+type columnDef struct {
+	table, name, decl string
+}
+
+// migrationSteps holds the Go part of each migration, by migration index.
+// Steps run after the SQL of the same index, inside the same transaction.
+var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
+	// 2: the maintainer's own review standing on the linked pull request or
+	// issue. Purely additive, so a database written by an older binary keeps
+	// every row and an older binary can still read a migrated database.
+	1: func(ctx context.Context, tx *sql.Tx) error {
+		return addColumns(ctx, tx, []columnDef{
+			{"cards", "gh_my_review_state", "TEXT NOT NULL DEFAULT ''"},
+			{"cards", "gh_my_reviewed_at", "TEXT NOT NULL DEFAULT ''"},
+			{"cards", "gh_is_stale_review", "INTEGER NOT NULL DEFAULT 0"},
+		})
+	},
+}
+
+// schemaVersion is the user_version of a fully migrated database.
+var schemaVersion = len(migrations)
+
+// addColumns adds each column that the table does not have yet, so the
+// migration also succeeds on a database where some of them already exist.
+func addColumns(ctx context.Context, tx *sql.Tx, cols []columnDef) error {
+	for _, col := range cols {
+		var n int
+		err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, col.table, col.name).Scan(&n)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			continue
+		}
+		stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, col.table, col.name, col.decl)
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("add %s.%s: %w", col.table, col.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -189,10 +258,17 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
-	for i := version; i < len(migrations); i++ {
+	for i := version; i < schemaVersion; i++ {
 		err := s.tx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
-				return err
+			if migrations[i] != "" {
+				if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+					return err
+				}
+			}
+			if step := migrationSteps[i]; step != nil {
+				if err := step(ctx, tx); err != nil {
+					return err
+				}
 			}
 			_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, i+1))
 			return err

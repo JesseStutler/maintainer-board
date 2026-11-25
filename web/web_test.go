@@ -13,7 +13,7 @@ import (
 func TestEmbeddedAssets(t *testing.T) {
 	for _, name := range []string{
 		"index.html", "styles.css", "theme-init.js", "favicon.svg",
-		"app.js", "api.js", "board.js", "drawer.js", "icons.js", "markdown.js", "modals.js", "state.js", "ui.js", "util.js",
+		"app.js", "api.js", "board.js", "drawer.js", "icons.js", "markdown.js", "modals.js", "models.js", "state.js", "ui.js", "util.js",
 	} {
 		data, err := fs.ReadFile(Files, name)
 		if err != nil {

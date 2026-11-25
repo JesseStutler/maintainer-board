@@ -281,3 +281,102 @@ func TestRollupCI(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectUser(t *testing.T) {
+	f := &fakeGH{responses: map[string]string{"api user --jq .login": "JesseStutler\n"}}
+	c := newFakeClient(f)
+	login, err := c.DetectUser(context.Background())
+	if err != nil || login != "JesseStutler" || c.User() != "JesseStutler" {
+		t.Fatalf("DetectUser = %q, %v; User() = %q", login, err, c.User())
+	}
+
+	// Offline, logged out or garbage output leaves the user unknown.
+	for name, f := range map[string]*fakeGH{
+		"offline": {errs: map[string]error{"api user": fmt.Errorf("%w: no route to host", ErrUnavailable)}},
+		"empty":   {responses: map[string]string{"api user": "\n"}},
+		"garbage": {responses: map[string]string{"api user": `{"message": "Bad credentials"}`}},
+	} {
+		c := newFakeClient(f)
+		if login, err := c.DetectUser(context.Background()); err == nil || login != "" || c.User() != "" {
+			t.Errorf("%s: DetectUser = %q, %v; User() = %q", name, login, err, c.User())
+		}
+	}
+
+	c.SetUser(" @Someone ")
+	if c.User() != "Someone" {
+		t.Errorf("SetUser did not normalize the login: %q", c.User())
+	}
+}
+
+// reviewedPRJSON is a pull request the current user reviewed, modelled on
+// volcano-sh/volcano#6247: two reviews by another member, plain comments by
+// the user, a Prow notifier comment and one review by the user on the head.
+const reviewedPRJSON = `{
+  "number": 6247, "state": "OPEN", "isDraft": false, "reviewDecision": "REVIEW_REQUIRED",
+  "title": "fix(scheduler): enforce CSI volume attach limits",
+  "url": "https://github.com/volcano-sh/volcano/pull/6247",
+  "author": {"login": "mohitvinchoo"},
+  "headRefOid": "c87a817a",
+  "commits": [
+    {"oid": "91d283c2", "committedDate": "2026-11-11T22:40:00Z"},
+    {"oid": "c87a817a", "committedDate": "2026-11-17T04:54:40Z"}
+  ],
+  "comments": [
+    {"author": {"login": "volcano-sh-bot"}, "createdAt": "2026-11-24T13:20:00Z", "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**"},
+    {"author": {"login": "JesseStutler"}, "createdAt": "2026-11-11T07:19:24Z", "body": "Thanks for raising this"},
+    {"author": {"login": "mohitvinchoo"}, "createdAt": "2026-11-17T08:45:40Z", "body": "> /lgtm\nDone, PTAL"}
+  ],
+  "reviews": [
+    {"author": {"login": "dafu-wu"}, "state": "COMMENTED", "submittedAt": "2026-11-17T05:58:16Z", "body": "Thanks for the quick turnaround", "commit": {"oid": "c87a817a"}},
+    {"author": {"login": "jessestutler"}, "state": "COMMENTED", "submittedAt": "2026-11-24T13:15:12Z", "body": "", "commit": {"oid": "c87a817a"}}
+  ],
+  "statusCheckRollup": []
+}`
+
+func TestFetchReportsMyReview(t *testing.T) {
+	fetch := func(user, view string) *Item {
+		t.Helper()
+		f := &fakeGH{responses: map[string]string{"pr view": view, "api repos": `{"number": 6247, "commits": 2}`}}
+		c := newFakeClient(f)
+		c.SetUser(user)
+		item, err := c.Fetch(context.Background(), "volcano-sh/volcano", 6247, KindPR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+
+	// The login comparison ignores case; the bot comment that came after the
+	// review is not somebody else's activity.
+	item := fetch("JesseStutler", reviewedPRJSON)
+	want := MyReview{State: MyReviewCommented, At: "2026-11-24T13:15:12Z", CommitSHA: "c87a817a"}
+	if item.MyReview != want {
+		t.Errorf("MyReview = %+v, want %+v", item.MyReview, want)
+	}
+	if item.LastCommitAt != "2026-11-17T04:54:40Z" || item.LastOtherActivityAt != "2026-11-17T08:45:40Z" {
+		t.Errorf("LastCommitAt = %q, LastOtherActivityAt = %q", item.LastCommitAt, item.LastOtherActivityAt)
+	}
+
+	// Without a known user nothing is attributed, and everybody is "other".
+	if item := fetch("", reviewedPRJSON); item.MyReview != (MyReview{}) || item.LastOtherActivityAt != "2026-11-24T13:15:12Z" {
+		t.Errorf("unknown user: MyReview = %+v, LastOtherActivityAt = %q", item.MyReview, item.LastOtherActivityAt)
+	}
+
+	// The author's own review comments are replies, not a review.
+	if item := fetch("mohitvinchoo", reviewedPRJSON); item.MyReview != (MyReview{}) {
+		t.Errorf("author's own pull request: MyReview = %+v", item.MyReview)
+	}
+
+	issue := &fakeGH{responses: map[string]string{"issue view": `{"number": 7, "state": "OPEN", "author": {"login": "reporter"},
+		"comments": [{"author": {"login": "JesseStutler"}, "createdAt": "2026-11-02T00:00:00Z", "body": "/lgtm"},
+		             {"author": {"login": "reporter"}, "createdAt": "2026-11-03T00:00:00Z", "body": "more details"}]}`}}
+	c := newFakeClient(issue)
+	c.SetUser("JesseStutler")
+	got, err := c.Fetch(context.Background(), "a/b", 7, KindIssue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MyReview != (MyReview{}) || got.LastOtherActivityAt != "2026-11-03T00:00:00Z" {
+		t.Errorf("issue: MyReview = %+v, LastOtherActivityAt = %q", got.MyReview, got.LastOtherActivityAt)
+	}
+}

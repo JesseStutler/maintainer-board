@@ -62,6 +62,15 @@ func harnessLabel(h string) string {
 	return h
 }
 
+// engineLabel names what wrote an AI summary: one of the two CLIs, or a
+// model the Copilot CLI was asked to use.
+func engineLabel(engine string) string {
+	if validHarness(engine) {
+		return harnessLabel(engine)
+	}
+	return engine + " (Copilot CLI)"
+}
+
 func truncateRunes(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -204,6 +213,7 @@ func (s *Server) syncAO(ctx context.Context) {
 	if changed {
 		s.hub.Publish()
 	}
+	s.requestContentIndex()
 }
 
 // reconcileSessions creates cards for sessions that have none, follows AO
@@ -429,6 +439,8 @@ func (s *Server) startSession(ctx context.Context, cardID string, req agentReque
 		DisplayName:         truncateRunes(card.Title, 100),
 		DisplayNameExplicit: true,
 		Prompt:              strings.TrimSpace(req.Prompt),
+		Model:               req.Model,
+		Effort:              req.Effort,
 	})
 	if err != nil {
 		return nil, err
@@ -441,7 +453,14 @@ func (s *Server) startSession(ctx context.Context, cardID string, req agentReque
 		if sess.DisplayName == c.Title {
 			c.AOTitle = sess.DisplayName
 		}
-		m.Event(db.EventSession, fmt.Sprintf("Started %s session %s", harnessLabel(req.Harness), sess.ID))
+		started := fmt.Sprintf("Started %s session %s", harnessLabel(req.Harness), sess.ID)
+		if req.Model != "" {
+			started += " with model " + req.Model
+			if req.Effort != "" {
+				started += " (effort " + req.Effort + ")"
+			}
+		}
+		m.Event(db.EventSession, started)
 		return nil
 	})
 	if err != nil {
@@ -467,6 +486,11 @@ func (s *Server) handleStartSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validHarness(req.Harness) {
 		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Agent must be copilot or codex.")
+		return
+	}
+	req.Model, req.Effort = strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort)
+	if err := s.validateSpawnModel(r.Context(), req); err != nil {
+		writeError(w, http.StatusBadRequest, "UNKNOWN_MODEL", capitalize(strings.TrimPrefix(err.Error(), errUnknownModel.Error()+": "))+".")
 		return
 	}
 	card, err := s.startSession(r.Context(), r.PathValue("id"), req)
@@ -682,11 +706,11 @@ func (s *Server) handleImportCandidates(w http.ResponseWriter, r *http.Request) 
 }
 
 // isSummarizerRun reports whether a history entry is one of the board's own
-// AI summary runs rather than a real working session. AO may shorten titles,
+// AI summary or AI search runs rather than a real working session. AO may shorten titles,
 // so only a prefix of the prompt marker is compared.
 func isSummarizerRun(title string) bool {
-	marker := summary.PromptMarker[:40]
-	return strings.HasPrefix(strings.TrimSpace(title), marker)
+	title = strings.TrimSpace(title)
+	return strings.HasPrefix(title, summary.PromptMarker[:40]) || strings.HasPrefix(title, summary.SearchPromptMarker[:40])
 }
 
 type importResultView struct {
@@ -811,7 +835,7 @@ func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := s.store.UpdateCard(ctx, id, func(c *db.Card, m *db.Mutation) error {
 		c.Summary, c.SummarySource = text, db.SummaryAI
-		m.Event(db.EventSummary, "AI summary refreshed with "+harnessLabel(engine))
+		m.Event(db.EventSummary, "AI summary refreshed with "+engineLabel(engine))
 		return nil
 	})
 	if err != nil {
