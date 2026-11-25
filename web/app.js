@@ -299,6 +299,12 @@ function renderHeader() {
     contentVersion = board.version;
     scheduleContentSearch();
   }
+  $('toggle-compact').setAttribute('aria-pressed', String(Boolean(f.compact)));
+  document.body.classList.toggle('is-compact', Boolean(f.compact));
+  const sortSelect = $('filter-sort');
+  const sortVal = f.sort || 'manual';
+  if (sortSelect.value !== sortVal) sortSelect.value = sortVal;
+  sortSelect.classList.toggle('is-active', sortVal !== 'manual');
   $('toggle-updates').setAttribute('aria-pressed', String(f.updatesOnly));
   $('toggle-done').setAttribute('aria-pressed', String(f.showDone));
   $('toggle-orchestrator').setAttribute('aria-pressed', String(board.settings.showOrchestrator));
@@ -484,6 +490,8 @@ function init() {
     if (button) setFilter('agent', button.dataset.value);
   });
   $('filter-author').addEventListener('change', (e) => setFilter('author', e.target.value));
+  $('filter-sort').addEventListener('change', (e) => setFilter('sort', e.target.value));
+  $('toggle-compact').addEventListener('click', () => setFilter('compact', !state.filters.compact));
   $('toggle-updates').addEventListener('click', () => setFilter('updatesOnly', !state.filters.updatesOnly));
   $('updates-pill').addEventListener('click', () => setFilter('updatesOnly', !state.filters.updatesOnly));
   $('toggle-done').addEventListener('click', () => setFilter('showDone', !state.filters.showDone));

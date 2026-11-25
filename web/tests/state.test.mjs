@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { state, matchesFilters, searchMatches, myReviewInfo, showCardReviewDecision, cardAuthors, isMine, activityInfo, ciInfo, reviewInfo, AUTHOR_MINE } from '../state.js';
+import { state, matchesFilters, searchMatches, myReviewInfo, showCardReviewDecision, sortColumnCards, cardAuthors, isMine, activityInfo, ciInfo, reviewInfo, AUTHOR_MINE } from '../state.js';
 
 function card(overrides = {}) {
   return {
@@ -173,4 +173,20 @@ test('labels shown on cards', () => {
   // Own PR keeps Review Required because personal badge is absent.
   const mine = pr({ ghAuthor: 'JesseStutler', ghReviewDecision: 'REVIEW_REQUIRED' });
   assert.equal(showCardReviewDecision(mine, myReviewInfo(mine)), true);
+});
+
+test('column card sorting respects pins, recent activity, unread first, and AI rank', () => {
+  const a = pr({ id: 'a', position: 0, ghUpdatedAt: '2026-11-20T00:00:00Z' });
+  const b = pr({ id: 'b', position: 1, ghUpdatedAt: '2026-11-25T00:00:00Z' });
+  const c = pr({ id: 'c', position: 2, ghUpdatedAt: '2026-11-22T00:00:00Z', hasUnreadUpdates: true });
+  const list = [a, b, c];
+
+  assert.deepEqual(sortColumnCards(list, { sort: 'manual', pinned: new Set() }).map((x) => x.id), ['a', 'b', 'c']);
+  assert.deepEqual(sortColumnCards(list, { sort: 'manual', pinned: new Set(['c']) }).map((x) => x.id), ['c', 'a', 'b']);
+  assert.deepEqual(sortColumnCards(list, { sort: 'recent', pinned: new Set() }).map((x) => x.id), ['b', 'c', 'a']);
+  assert.deepEqual(sortColumnCards(list, { sort: 'unread', pinned: new Set() }).map((x) => x.id), ['c', 'b', 'a']);
+  assert.deepEqual(sortColumnCards(list, { sort: 'unread', pinned: new Set(['a']) }).map((x) => x.id), ['a', 'c', 'b']);
+
+  const aiMatches = new Map([['b', { rank: 0 }], ['a', { rank: 1 }], ['c', { rank: 2 }]]);
+  assert.deepEqual(sortColumnCards(list, { sort: 'unread', pinned: new Set(['c']), aiMatches }).map((x) => x.id), ['b', 'a', 'c']);
 });

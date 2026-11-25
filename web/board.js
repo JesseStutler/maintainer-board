@@ -3,15 +3,21 @@
 import { h, relTime, plural } from './util.js';
 import { icon, brandIcon } from './icons.js';
 import { api, cardPath } from './api.js';
-import { toastError } from './ui.js';
+import { toast, toastError } from './ui.js';
 import {
   state,
   emit,
   cards,
   cardById,
+  columns,
   visibleColumns,
   columnCards,
+  sortColumnCards,
   matchesFilters,
+  isColumnCollapsed,
+  toggleColumnCollapsed,
+  isCardPinned,
+  toggleCardPinned,
   categoryLabel,
   harnessLabel,
   activityInfo,
@@ -29,9 +35,101 @@ import {
 let handlers = { onOpenCard: () => {}, onAddCard: () => {}, onRefresh: () => {} };
 let drag = null;
 let pendingRender = false;
+let activeMenu = null;
 
 export function initBoard(options) {
   handlers = { ...handlers, ...options };
+}
+
+function closeCardMenu() {
+  if (!activeMenu) return;
+  activeMenu.cleanup();
+  activeMenu.el.remove();
+  activeMenu = null;
+}
+
+/**
+ * Floating quick-action menu for a card: pin to top or move directly to any
+ * column without dragging across a crowded board.
+ */
+function openCardMenu(card, pos) {
+  closeCardMenu();
+  const pinned = isCardPinned(card.id);
+  const pinBtn = h(
+    'button',
+    {
+      class: 'card-menu-item',
+      type: 'button',
+      onClick: () => {
+        closeCardMenu();
+        toggleCardPinned(card.id);
+        toast(pinned ? 'Card unpinned.' : 'Card pinned to top.', 'info');
+      },
+    },
+    icon('pin', 13),
+    h('span', null, pinned ? 'Unpin from top' : 'Pin to top'),
+  );
+
+  const targets = columns().map((col) => {
+    const current = col.id === card.columnId;
+    return h(
+      'button',
+      {
+        class: ['card-menu-item', current && 'is-current'],
+        type: 'button',
+        disabled: current,
+        onClick: () => {
+          closeCardMenu();
+          const first = columnCards(col.id).find((c) => c.id !== card.id);
+          moveCard(card.id, col.id, first ? first.id : null, { toTop: true, label: col.title });
+        },
+      },
+      h('span', { class: 'card-menu-dot', style: { background: col.color } }),
+      h('span', { class: 'card-menu-label' }, col.title),
+      current ? icon('check', 13) : null,
+    );
+  });
+
+  const menu = h(
+    'div',
+    { class: 'card-menu', role: 'menu', 'aria-label': `Actions for ${card.title}` },
+    pinBtn,
+    h('div', { class: 'card-menu-sep' }),
+    h('div', { class: 'card-menu-head' }, 'Move to'),
+    ...targets,
+  );
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const x = Math.max(8, Math.min(pos.x, window.innerWidth - rect.width - 8));
+  const y = Math.max(8, Math.min(pos.y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+
+  const onPointerDown = (e) => {
+    if (!menu.contains(e.target)) closeCardMenu();
+  };
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      closeCardMenu();
+    }
+  };
+  const onDismiss = () => closeCardMenu();
+  document.addEventListener('pointerdown', onPointerDown, true);
+  document.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('resize', onDismiss);
+  window.addEventListener('scroll', onDismiss, true);
+  activeMenu = {
+    el: menu,
+    cleanup: () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('resize', onDismiss);
+      window.removeEventListener('scroll', onDismiss, true);
+    },
+  };
 }
 
 /** A compact status chip for the card face. */
@@ -68,9 +166,13 @@ function cardTime(card) {
   return { at: card.updatedAt, what: 'Card updated' };
 }
 
-/** Top row: category, linked pull request or issue with its state, author. */
+/** Top row: category, linked pull request or issue with its state, author, quick actions. */
 function cardTop(card) {
+  const pinned = isCardPinned(card.id);
   const top = h('div', { class: 'card-top' }, h('span', { class: `badge badge-cat-${card.category}` }, categoryLabel(card.category)));
+  if (pinned) {
+    top.appendChild(h('span', { class: 'card-pin', title: 'Pinned to top of column' }, icon('pin', 11)));
+  }
   if (card.ghNumber) {
     const info = ghStateInfo(card);
     const kind = card.ghKind === 'issue' ? 'Issue ' : card.ghKind === 'pr' ? 'PR ' : '';
@@ -95,6 +197,23 @@ function cardTop(card) {
       ),
     );
   }
+  top.appendChild(
+    h(
+      'button',
+      {
+        class: 'btn btn-ghost btn-icon btn-sm card-menu-btn',
+        type: 'button',
+        title: 'Quick move or pin (or right-click card)',
+        'aria-label': 'Quick move or pin card',
+        onClick: (e) => {
+          e.stopPropagation();
+          const rect = e.currentTarget.getBoundingClientRect();
+          openCardMenu(card, { x: rect.left, y: rect.bottom + 4 });
+        },
+      },
+      icon('more', 14),
+    ),
+  );
   return top;
 }
 
@@ -143,7 +262,7 @@ function renderCard(card) {
   const el = h(
     'article',
     {
-      class: ['card', card.hasUnreadUpdates && 'has-updates', state.selectedCardId === card.id && 'is-selected'],
+      class: ['card', card.hasUnreadUpdates && 'has-updates', isCardPinned(card.id) && 'is-pinned', state.selectedCardId === card.id && 'is-selected'],
       draggable: true,
       tabindex: '0',
       role: 'button',
@@ -204,6 +323,10 @@ function renderCard(card) {
   );
 
   el.addEventListener('click', () => handlers.onOpenCard(card.id));
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    openCardMenu(card, { x: e.clientX, y: e.clientY });
+  });
   el.addEventListener('keydown', (e) => {
     if (e.target === el && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
@@ -242,12 +365,14 @@ function dropBefore(body, clientY) {
   return null;
 }
 
-async function moveCard(cardId, columnId, beforeId) {
+async function moveCard(cardId, columnId, beforeId, opts = {}) {
   const card = cardById(cardId);
   if (!card) return;
   const others = columnCards(columnId).filter((c) => c.id !== cardId);
   let index;
-  if (beforeId) {
+  if (opts.toTop) {
+    index = 0;
+  } else if (beforeId) {
     index = others.findIndex((c) => c.id === beforeId);
     if (index < 0) index = others.length;
   } else {
@@ -273,6 +398,7 @@ async function moveCard(cardId, columnId, beforeId) {
   emit();
   try {
     await api.patch(cardPath(cardId, '/move'), { columnId, position: index });
+    if (opts.label) toast(`Moved to ${opts.label}.`, 'success');
   } catch (err) {
     toastError(err);
   }
@@ -281,9 +407,58 @@ async function moveCard(cardId, columnId, beforeId) {
 
 function renderColumn(column) {
   const all = columnCards(column.id);
-  const visible = all.filter(matchesFilters);
-  // AI results are shown best match first within each column.
-  if (aiSearchActive()) visible.sort((a, b) => state.ai.matches.get(a.id).rank - state.ai.matches.get(b.id).rank);
+  const visible = sortColumnCards(all.filter(matchesFilters), {
+    aiMatches: aiSearchActive() ? state.ai.matches : null,
+  });
+  const count = visible.length === all.length ? String(all.length) : `${visible.length}/${all.length}`;
+  const unreadInCol = visible.filter((c) => c.hasUnreadUpdates).length;
+
+  if (isColumnCollapsed(column.id)) {
+    const rail = h(
+      'section',
+      {
+        class: ['column', 'is-collapsed', unreadInCol > 0 && 'has-unread'],
+        'aria-label': `${column.title} (collapsed, ${count})`,
+        title: `Expand ${column.title} (${plural(all.length, 'card')})`,
+        dataset: { columnId: column.id, role: column.role },
+        style: { '--col-accent': column.color },
+      },
+      h(
+        'button',
+        {
+          class: 'column-rail-btn',
+          type: 'button',
+          onClick: () => toggleColumnCollapsed(column.id),
+        },
+        icon('chevron-right', 14),
+        h('span', { class: 'column-accent' }),
+        h('span', { class: ['column-count', unreadInCol > 0 && 'is-warning'] }, count),
+        h('span', { class: 'column-rail-title' }, column.title),
+      ),
+    );
+    rail.addEventListener('dragover', (e) => {
+      if (!drag) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      for (const other of document.querySelectorAll('.column.is-drop-target')) {
+        if (other !== rail) other.classList.remove('is-drop-target');
+      }
+      rail.classList.add('is-drop-target');
+    });
+    rail.addEventListener('dragleave', (e) => {
+      if (!drag || rail.contains(e.relatedTarget)) return;
+      rail.classList.remove('is-drop-target');
+    });
+    rail.addEventListener('drop', (e) => {
+      if (!drag) return;
+      e.preventDefault();
+      const cardId = drag.cardId;
+      endDrag();
+      moveCard(cardId, column.id, null, { toTop: true, label: column.title });
+    });
+    return rail;
+  }
+
   const body = h('div', { class: 'column-body', dataset: { columnId: column.id } });
   if (visible.length === 0) {
     body.appendChild(h('div', { class: 'column-empty' }, all.length > 0 ? 'No cards match the filters' : 'No cards'));
@@ -291,7 +466,6 @@ function renderColumn(column) {
     for (const card of visible) body.appendChild(renderCard(card));
   }
 
-  const count = visible.length === all.length ? String(all.length) : `${visible.length}/${all.length}`;
   const el = h(
     'section',
     { class: 'column', 'aria-label': column.title, dataset: { columnId: column.id, role: column.role }, style: { '--col-accent': column.color } },
@@ -302,6 +476,11 @@ function renderColumn(column) {
       h('h2', { class: 'column-title', title: column.title }, column.title),
       h('span', { class: 'column-count', title: `${plural(all.length, 'card')} in this column` }, count),
       h('span', { class: 'spacer' }),
+      h(
+        'button',
+        { class: 'btn btn-ghost btn-icon btn-sm', type: 'button', title: `Collapse ${column.title}`, 'aria-label': `Collapse ${column.title}`, onClick: () => toggleColumnCollapsed(column.id) },
+        icon('chevron-left', 14),
+      ),
       h(
         'button',
         { class: 'btn btn-ghost btn-icon btn-sm', type: 'button', title: `New task in ${column.title}`, 'aria-label': `New task in ${column.title}`, onClick: () => handlers.onAddCard(column.id) },

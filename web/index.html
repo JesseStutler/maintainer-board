@@ -84,7 +84,17 @@
           <option value="">All Authors</option>
         </select>
       </label>
+      <label class="filter-select" title="Sort cards within each column (pinned cards always stay on top)">
+        <span class="icon" data-icon="sort"></span>
+        <select id="filter-sort" class="select" aria-label="Sort order">
+          <option value="manual">Manual Order</option>
+          <option value="recent">Recent Activity</option>
+          <option value="unread">Unread First</option>
+        </select>
+      </label>
       <div class="toggles">
+        <button id="toggle-compact" class="toggle" type="button" aria-pressed="false"
+          title="Compact cards: hide summaries and tags to fit more cards per column">Compact</button>
         <button id="toggle-updates" class="toggle" type="button" aria-pressed="false">Updates Only</button>
         <button id="toggle-done" class="toggle" type="button" aria-pressed="true">Show Done</button>
         <button id="toggle-orchestrator" class="toggle" type="button" aria-pressed="false"

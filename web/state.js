@@ -23,7 +23,9 @@ export const ROLES = [
 export const COLOR_PRESETS = ['#6e7681', '#3b82f6', '#a855f7', '#f59e0b', '#10b981', '#52525b', '#ef4444', '#ec4899', '#14b8a6'];
 
 const FILTER_KEY = 'mb.filters';
-const DEFAULT_FILTERS = { search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true };
+const COLLAPSED_COLS_KEY = 'mb.collapsedCols';
+const PINNED_CARDS_KEY = 'mb.pinnedCards';
+const DEFAULT_FILTERS = { search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true, compact: false, sort: 'manual' };
 
 /** Value of the author filter that selects the maintainer's own items. */
 export const AUTHOR_MINE = '@me';
@@ -31,6 +33,8 @@ export const AUTHOR_MINE = '@me';
 export const state = {
   board: null,
   filters: { ...DEFAULT_FILTERS, ...storageGet(FILTER_KEY, {}), search: '' },
+  collapsedCols: new Set(storageGet(COLLAPSED_COLS_KEY, [])),
+  pinnedCards: new Set(storageGet(PINNED_CARDS_KEY, [])),
   selectedCardId: null,
   // Server-side search result for the query identified by `key`: cards
   // found through their session ID or conversation text.
@@ -391,6 +395,77 @@ export function columnCards(columnId) {
   return cards()
     .filter((c) => c.columnId === columnId)
     .sort((a, b) => a.position - b.position);
+}
+
+export function isColumnCollapsed(columnId) {
+  return state.collapsedCols.has(columnId);
+}
+
+export function toggleColumnCollapsed(columnId) {
+  if (state.collapsedCols.has(columnId)) state.collapsedCols.delete(columnId);
+  else state.collapsedCols.add(columnId);
+  storageSet(COLLAPSED_COLS_KEY, Array.from(state.collapsedCols));
+  emit();
+}
+
+export function isCardPinned(cardId) {
+  return state.pinnedCards.has(cardId);
+}
+
+export function toggleCardPinned(cardId) {
+  if (state.pinnedCards.has(cardId)) state.pinnedCards.delete(cardId);
+  else state.pinnedCards.add(cardId);
+  storageSet(PINNED_CARDS_KEY, Array.from(state.pinnedCards));
+  emit();
+}
+
+function activityTimestamp(card) {
+  const times = [
+    card.ghUpdatedAt,
+    card.session && card.session.activity && card.session.activity.lastActivityAt,
+    card.updatedAt,
+  ];
+  let best = 0;
+  for (const t of times) {
+    if (!t) continue;
+    const ms = Date.parse(t);
+    if (!Number.isNaN(ms) && ms > best) best = ms;
+  }
+  return best;
+}
+
+function needsAttention(card) {
+  return Boolean(card.hasUnreadUpdates || (card.ghIsStaleReview && card.ghState !== 'MERGED' && card.ghState !== 'CLOSED'));
+}
+
+/**
+ * Sorts visible cards inside a column. AI search preserves relevance rank;
+ * otherwise pinned cards stay on top followed by manual, recent activity,
+ * or unread-first ordering.
+ */
+export function sortColumnCards(list, { sort = state.filters.sort, pinned = state.pinnedCards, aiMatches = null } = {}) {
+  const out = [...list];
+  if (aiMatches) {
+    out.sort((a, b) => aiMatches.get(a.id).rank - aiMatches.get(b.id).rank);
+    return out;
+  }
+  out.sort((a, b) => {
+    const pa = pinned.has(a.id) ? 0 : 1;
+    const pb = pinned.has(b.id) ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    if (sort === 'unread') {
+      const ua = needsAttention(a) ? 0 : 1;
+      const ub = needsAttention(b) ? 0 : 1;
+      if (ua !== ub) return ua - ub;
+      const dt = activityTimestamp(b) - activityTimestamp(a);
+      if (dt !== 0) return dt;
+    } else if (sort === 'recent') {
+      const dt = activityTimestamp(b) - activityTimestamp(a);
+      if (dt !== 0) return dt;
+    }
+    return a.position - b.position;
+  });
+  return out;
 }
 
 export function unreadCount() {
