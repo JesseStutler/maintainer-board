@@ -384,8 +384,8 @@ func NewAI(workDir string) *AI {
 
 func toolEnv() []string {
 	env := os.Environ()
-	extra := "/root/.local/bin:/usr/local/bin"
-	if home, err := os.UserHomeDir(); err == nil && home != "/root" {
+	extra := "/usr/local/bin"
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		extra = filepath.Join(home, ".local", "bin") + ":" + extra
 	}
 	for i, kv := range env {

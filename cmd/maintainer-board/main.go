@@ -46,7 +46,7 @@ func splitList(s string) []string {
 func run() error {
 	var (
 		addr           = flag.String("addr", "127.0.0.1:3012", "listen address")
-		dbPath         = flag.String("db", "/root/tools/maintainer-board/data/board.db", "SQLite database path")
+		dbPath         = flag.String("db", "./data/board.db", "SQLite database path")
 		aoURL          = flag.String("ao-url", "http://127.0.0.1:3001", "base URL of the local AO daemon")
 		aoProject      = flag.String("ao-project", "", "AO project for new agent sessions (default: the first project AO reports)")
 		defaultRepo    = flag.String("default-repo", "volcano-sh/volcano", "repository used for bare #123 references")
