@@ -54,17 +54,94 @@ func openPR() Snapshot {
 	return Snapshot{State: StateOpen, CI: CISuccess, ReviewDecision: ReviewRequired, HeadSHA: "aaa", Commits: 3, Comments: 2, ReviewComments: 1, UpdatedAt: "t0"}
 }
 
-func TestFirstSyncRecordsBaselineWithoutMoving(t *testing.T) {
-	for _, state := range []string{StateOpen, StateDraft, StateMerged, StateClosed} {
+func TestFirstSyncRecordsBaselineAndTriagesInbox(t *testing.T) {
+	// Open/draft PRs without a personal review stay in Inbox; merged/closed
+	// items triage straight to Done.
+	for _, tc := range []struct {
+		state    string
+		wantRole string
+	}{
+		{StateOpen, ""},
+		{StateDraft, ""},
+		{StateMerged, RoleDone},
+		{StateClosed, RoleDone},
+	} {
 		tr := newTracker(t, RoleInbox)
+		live := openPR()
+		live.State = tc.state
+		res := tr.poll(live)
+		if res.MoveToRole != tc.wantRole || res.NewCycle || len(res.Events) != 0 {
+			t.Fatalf("%s: first sync produced %+v, want move %q", tc.state, res, tc.wantRole)
+		}
+		if tr.track.Ack != live || tr.track.Prev != live || tr.track.HasUnread {
+			t.Fatalf("%s: baseline not recorded: %+v", tc.state, tr.track)
+		}
+	}
+
+	// Non-Inbox cards keep their user-chosen column on first sync.
+	for _, state := range []string{StateOpen, StateMerged, StateClosed} {
+		tr := newTracker(t, RoleWaiting)
 		live := openPR()
 		live.State = state
 		res := tr.poll(live)
-		if res.MoveToRole != "" || res.NewCycle || len(res.Events) != 0 {
-			t.Fatalf("%s: first sync produced %+v", state, res)
+		if res.MoveToRole != "" {
+			t.Fatalf("non-inbox %s moved to %q on first sync", state, res.MoveToRole)
 		}
-		if tr.track.Ack != live || tr.track.Prev != live || tr.track.HasUnread {
-			t.Fatalf("%s: baseline not recorded: %+v", state, tr.track)
+	}
+
+	// Inbox PRs with an existing personal review or own-PR status triage on first sync.
+	cases := map[string]struct {
+		in       Input
+		wantMove string
+	}{
+		"stale review goes to updates": {
+			in: Input{
+				Live: openPR(), FirstSync: true, AutoMove: true, ColumnRole: RoleInbox, Kind: KindPR,
+				MyReviewState: MyReviewCommented, MyReviewStale: true,
+			},
+			wantMove: RoleUpdates,
+		},
+		"current review goes to waiting": {
+			in: Input{
+				Live: openPR(), FirstSync: true, AutoMove: true, ColumnRole: RoleInbox, Kind: KindPR,
+				MyReviewState: MyReviewCommented, MyReviewStale: false,
+			},
+			wantMove: RoleWaiting,
+		},
+		"current review approved with green CI goes to ready": {
+			in: Input{
+				Live: Snapshot{State: StateOpen, CI: CISuccess, ReviewDecision: ReviewApproved, HeadSHA: "aaa"},
+				FirstSync: true, AutoMove: true, ColumnRole: RoleInbox, Kind: KindPR,
+				MyReviewState: MyReviewApproved, MyReviewStale: false,
+			},
+			wantMove: RoleReady,
+		},
+		"own PR with changes requested goes to updates": {
+			in: Input{
+				Live: Snapshot{State: StateOpen, CI: CISuccess, ReviewDecision: ReviewChangesRequested, HeadSHA: "aaa"},
+				FirstSync: true, AutoMove: true, ColumnRole: RoleInbox, Kind: KindPR, Own: true,
+			},
+			wantMove: RoleUpdates,
+		},
+		"own PR approved with green CI goes to ready": {
+			in: Input{
+				Live: Snapshot{State: StateOpen, CI: CISuccess, ReviewDecision: ReviewApproved, HeadSHA: "aaa"},
+				FirstSync: true, AutoMove: true, ColumnRole: RoleInbox, Kind: KindPR, Own: true,
+			},
+			wantMove: RoleReady,
+		},
+		"autoMove off keeps inbox": {
+			in: Input{
+				Live: openPR(), FirstSync: true, AutoMove: false, ColumnRole: RoleInbox, Kind: KindPR,
+				MyReviewState: MyReviewCommented, MyReviewStale: true,
+			},
+			wantMove: "",
+		},
+	}
+	for name, tc := range cases {
+		res := Evaluate(tc.in)
+		if res.MoveToRole != tc.wantMove || res.Track.HasUnread {
+			t.Errorf("%s: got move=%q unread=%v, want move=%q", name, res.MoveToRole, res.Track.HasUnread, tc.wantMove)
 		}
 	}
 }

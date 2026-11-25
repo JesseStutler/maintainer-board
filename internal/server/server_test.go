@@ -2313,3 +2313,55 @@ func TestInferCategory(t *testing.T) {
 		}
 	}
 }
+
+func TestFirstSyncTriagesInboxCard(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "JesseStutler"
+
+	// Stale personal review (Re-review needed) on an imported PR lands in Updates.
+	hn.gh.updateItem("volcano-sh/volcano#6247", func(it *github.Item) {
+		it.Author = "mohit"
+		it.Snapshot.State = github.StateOpen
+		it.Snapshot.HeadSHA = "head-new"
+		it.MyReview = github.MyReview{State: github.MyReviewCommented, At: reviewAt, CommitSHA: "head-old"}
+		it.LastCommitAt = farFuture
+	})
+	hn.ao.sessions = []ao.Session{worker("standalone-1", "codex", "[PR #6247] CSI limits")}
+	hn.syncAO()
+
+	c := hn.cardBySession("standalone-1")
+	if c == nil {
+		t.Fatal("expected card for imported session")
+	}
+	if c.ColumnID != "updates" || !c.GHIsStaleReview || c.GHMyReviewState != github.MyReviewCommented {
+		t.Fatalf("stale-review card = col %q stale=%v myReview=%q, want updates / true / COMMENTED", c.ColumnID, c.GHIsStaleReview, c.GHMyReviewState)
+	}
+	if c.HasUnreadUpdates {
+		t.Fatalf("first sync should not fabricate unread count: %+v", c)
+	}
+
+	// Up-to-date personal review on an imported PR lands in Waiting.
+	hn.gh.items["volcano-sh/volcano#6300"] = &github.Item{
+		Repo:   "volcano-sh/volcano",
+		Kind:   github.KindPR,
+		Number: 6300,
+		Title:  "reviewed PR",
+		Author: "someone",
+		Snapshot: github.Snapshot{
+			State:          github.StateOpen,
+			CI:             github.CISuccess,
+			ReviewDecision: github.ReviewRequired,
+			HeadSHA:        "sha-live",
+		},
+		MyReview:     github.MyReview{State: github.MyReviewCommented, At: reviewAt, CommitSHA: "sha-live"},
+		LastCommitAt: longAgo,
+	}
+	hn.ao.sessions = append(hn.ao.sessions, worker("standalone-2", "codex", "[PR #6300] reviewed PR"))
+	hn.syncAO()
+
+	c2 := hn.cardBySession("standalone-2")
+	if c2 == nil || c2.ColumnID != "waiting" || c2.GHIsStaleReview {
+		t.Fatalf("current-review card = %+v, want waiting / stale=false", c2)
+	}
+}
+

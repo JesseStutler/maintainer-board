@@ -145,6 +145,17 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 				github.ReviewCoversLive(item.MyReview, snap, item.LastCommitAt, item.LastOtherActivityAt)
 		}
 
+		review := github.EvaluateReview(github.ReviewInput{
+			GitHub:              item.MyReview,
+			StoredState:         c.GHMyReviewState,
+			StoredAt:            c.GHMyReviewedAt,
+			AckHeadSHA:          c.AckHeadSHA,
+			Own:                 own,
+			Live:                snap,
+			LastCommitAt:        item.LastCommitAt,
+			LastOtherActivityAt: item.LastOtherActivityAt,
+		})
+
 		result = github.Evaluate(github.Input{
 			Live:                  snap,
 			Track:                 trackingOf(c),
@@ -159,7 +170,8 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			OtherReplies:          otherReplies,
 			OwnReviewOnly:         ownReviewOnly,
 			MyReviewSubmitted:     myReviewSubmitted,
-			MyReviewState:         item.MyReview.State,
+			MyReviewState:         review.State,
+			MyReviewStale:         review.Stale,
 			LatestOtherActivityAt: item.LastOtherActivityAt,
 			PrevOtherActivityAt:   c.PrevOtherActivityAt,
 		})
@@ -173,16 +185,6 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			}
 			c.PrevOtherActivityAt = item.LastOtherActivityAt
 		}
-		review := github.EvaluateReview(github.ReviewInput{
-			GitHub:              item.MyReview,
-			StoredState:         c.GHMyReviewState,
-			StoredAt:            c.GHMyReviewedAt,
-			AckHeadSHA:          c.AckHeadSHA,
-			Own:                 own,
-			Live:                snap,
-			LastCommitAt:        item.LastCommitAt,
-			LastOtherActivityAt: item.LastOtherActivityAt,
-		})
 		c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = review.State, review.At, review.Stale
 		if first {
 			c.AckAt = now

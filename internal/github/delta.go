@@ -86,8 +86,12 @@ type Input struct {
 	// on someone else's open PR that covers the live head commit and all
 	// non-self human activity.
 	MyReviewSubmitted bool
-	// MyReviewState is the personal review state for MyReviewSubmitted.
+	// MyReviewState is the personal review state for MyReviewSubmitted or
+	// initial triage on FirstSync.
 	MyReviewState string
+	// MyReviewStale is true when the user's GitHub review is out of date
+	// (newer commits or non-self comments/reviews exist).
+	MyReviewStale bool
 	// LatestOtherActivityAt is the newest non-self, non-bot activity timestamp.
 	LatestOtherActivityAt string
 	// PrevOtherActivityAt is LatestOtherActivityAt from the previous poll.
@@ -145,11 +149,50 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("+%d %ss", n, noun)
 }
 
+// initialTriageRole picks the landing column on a card's first GitHub sync
+// when it is still in Inbox, so imported sessions and newly linked PRs/issues
+// start in the column that matches their live GitHub status instead of
+// staying in Inbox.
+func initialTriageRole(in Input) string {
+	if !in.AutoMove || in.ColumnRole != RoleInbox {
+		return ""
+	}
+	live := in.Live
+	if IsTerminal(live.State) {
+		return RoleDone
+	}
+	if in.Kind == KindIssue {
+		return ""
+	}
+	if in.Own {
+		switch {
+		case live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0:
+			return RoleReady
+		case live.State == StateOpen && live.ReviewDecision == ReviewChangesRequested:
+			return RoleUpdates
+		default:
+			return ""
+		}
+	}
+	if in.MyReviewStale {
+		return RoleUpdates
+	}
+	if in.MyReviewState != "" {
+		if live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0 {
+			return RoleReady
+		}
+		return RoleWaiting
+	}
+	return ""
+}
+
 // Evaluate compares the live state against the acknowledged baseline and the
 // previous poll, and decides the new tracking state and any column move.
 //
 // Rules:
-//   - The first sync only records the baseline.
+//   - The first sync records the baseline without marking unread updates, and
+//     triages Inbox cards whose live GitHub state already belongs in Done,
+//     Updates, Waiting, or Ready.
 //   - Merged and closed items never count as unread; the transition moves the
 //     card to the done column.
 //   - Otherwise new commits, new comments, a state change, a settled CI result
@@ -160,7 +203,10 @@ func plural(n int, noun string) string {
 func Evaluate(in Input) Result {
 	live := in.Live
 	if in.FirstSync {
-		return Result{Track: Ack(live)}
+		return Result{
+			Track:      Ack(live),
+			MoveToRole: initialTriageRole(in),
+		}
 	}
 	ack, prev := in.Track.Ack, in.Track.Prev
 
