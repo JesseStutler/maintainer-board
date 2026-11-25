@@ -40,7 +40,7 @@ Upstream AO       gh CLI               Copilot / Codex CLI
   - **Reviewing others' PRs**: Surfaces actionable signals (`Author pushed +N commits`, `Author force-pushed`, `Author replied (+N)`, `Re-review needed`) while ignoring your own comments/reviews and bot activity.
   - **Tracking your own PRs (`MINE`)**: Ignores your own pushes/comments and highlights `Reviewer commented (+N)`, `Changes requested`, or `Approved`.
   - **Inline review comments & Prow support**: Polls both issue comments and inline PR review threads, and recognizes Prow `/lgtm` + `/approve` labels alongside GitHub review states.
-- **Automatic column transitions**: Cards with unread GitHub updates move into **Updates** (with a cycle counter since your last review), approved PRs with passing CI move to **Ready**, and merged/closed items move to **Done**. One-click **Mark Caught Up** or **Reviewed -> Waiting** resets your review checkpoint.
+- **Automatic column transitions**: Cards with unread GitHub updates move into **Updates** (with a cycle counter since your last review), submitting a GitHub review on someone else's PR automatically clears unread alerts and moves the card to **Waiting** (or **Ready** once approved with passing CI), and merged/closed items move to **Done**. One-click **Mark Caught Up** or **Reviewed -> Waiting** also lets you checkpoint manually.
 - **Rich filtering & customization**: Filter by category (`PR Review`, `Issue`, `Dev`, `Design`, `Triage`), agent (`Copilot`, `Codex`), PR author, `Updates Only`, or instant full-text search across cards, session IDs, and transcripts. Columns can be added, renamed, reordered, or hidden.
 
 ### 2. Full-Width Expandable Agent Workspace & Model Picker

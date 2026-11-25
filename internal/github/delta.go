@@ -82,6 +82,12 @@ type Input struct {
 	// OwnReviewOnly is true when the current user submitted a review on
 	// someone else's PR after the baseline and no other person acted after.
 	OwnReviewOnly bool
+	// MyReviewSubmitted is true when the current user submitted a newer review
+	// on someone else's open PR that covers the live head commit and all
+	// non-self human activity.
+	MyReviewSubmitted bool
+	// MyReviewState is the personal review state for MyReviewSubmitted.
+	MyReviewState string
 	// LatestOtherActivityAt is the newest non-self, non-bot activity timestamp.
 	LatestOtherActivityAt string
 	// PrevOtherActivityAt is LatestOtherActivityAt from the previous poll.
@@ -117,6 +123,19 @@ func terminalNote(state string) string {
 		return "Merged"
 	}
 	return "Closed"
+}
+
+func myReviewEvent(state string) string {
+	switch state {
+	case MyReviewApproved:
+		return "Your review submitted (approved); baseline updated"
+	case MyReviewLGTM:
+		return "Your review submitted (/lgtm); baseline updated"
+	case MyReviewChangesRequested:
+		return "Your review submitted (changes requested); baseline updated"
+	default:
+		return "Your review submitted (commented); baseline updated"
+	}
 }
 
 func plural(n int, noun string) string {
@@ -161,6 +180,26 @@ func Evaluate(in Input) Result {
 			res.Events = append(res.Events, terminalNote(live.State))
 			if in.AutoMove && in.ColumnRole != RoleDone {
 				res.MoveToRole = RoleDone
+			}
+		}
+		return res
+	}
+
+	// A fresh review submitted by the maintainer on someone else's PR that
+	// covers the latest head and author replies re-baselines the card and
+	// moves it out of active review queues into Ready or Waiting once.
+	if in.MyReviewSubmitted {
+		res := Result{Track: Ack(live)}
+		res.Track.Prev = nextPrev
+		res.Events = append(res.Events, myReviewEvent(in.MyReviewState))
+		if in.AutoMove {
+			switch {
+			case live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0:
+				if in.ColumnRole != RoleReady && in.ColumnRole != RoleDone {
+					res.MoveToRole = RoleReady
+				}
+			case in.ColumnRole == RoleInbox || in.ColumnRole == RoleInProgress || in.ColumnRole == RoleUpdates:
+				res.MoveToRole = RoleWaiting
 			}
 		}
 		return res

@@ -135,10 +135,14 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			baselineAt = c.GHMyReviewedAt
 		}
 		var authorReplies, otherReplies int
-		var ownReviewOnly bool
+		var ownReviewOnly, myReviewSubmitted bool
 		if item.HasActorData && !first {
 			authorReplies, otherReplies = github.CountNewActivities(item.OtherActivities, item.Author, baselineAt, own)
 			ownReviewOnly = !own && item.MyReview.State != "" && github.After(item.MyReview.At, baselineAt) && authorReplies == 0 && otherReplies == 0
+			myReviewSubmitted = !own && item.Kind == github.KindPR &&
+				item.MyReview.State != "" &&
+				github.After(item.MyReview.At, c.GHMyReviewedAt) &&
+				github.ReviewCoversLive(item.MyReview, snap, item.LastCommitAt, item.LastOtherActivityAt)
 		}
 
 		result = github.Evaluate(github.Input{
@@ -154,6 +158,8 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			AuthorReplies:         authorReplies,
 			OtherReplies:          otherReplies,
 			OwnReviewOnly:         ownReviewOnly,
+			MyReviewSubmitted:     myReviewSubmitted,
+			MyReviewState:         item.MyReview.State,
 			LatestOtherActivityAt: item.LastOtherActivityAt,
 			PrevOtherActivityAt:   c.PrevOtherActivityAt,
 		})
@@ -161,6 +167,9 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 		if item.HasActorData {
 			if first {
 				c.AckOtherActivityAt = github.LatestTime(item.LastOtherActivityAt, snap.UpdatedAt)
+			} else if myReviewSubmitted {
+				c.AckOtherActivityAt = github.LatestTime(item.LastOtherActivityAt, item.MyReview.At)
+				c.AckAt = now
 			}
 			c.PrevOtherActivityAt = item.LastOtherActivityAt
 		}

@@ -537,6 +537,125 @@ func TestCountNewActivitiesAndInlineReviewComments(t *testing.T) {
 	}
 }
 
+func TestReviewCoversLive(t *testing.T) {
+	live := openPR()
+	rv := MyReview{State: MyReviewCommented, At: "2026-11-20T12:00:00Z", CommitSHA: "aaa"}
+
+	if !ReviewCoversLive(rv, live, "2026-11-20T11:00:00Z", "2026-11-20T11:30:00Z") {
+		t.Fatal("expected review covering head SHA and older activity to be current")
+	}
+	if ReviewCoversLive(rv, live, "2026-11-20T11:00:00Z", "2026-11-20T12:05:00Z") {
+		t.Fatal("expected newer non-self activity to invalidate ReviewCoversLive")
+	}
+	pushed := live
+	pushed.HeadSHA = "bbb"
+	if ReviewCoversLive(rv, pushed, "2026-11-20T11:00:00Z", "2026-11-20T11:30:00Z") {
+		t.Fatal("expected newer head SHA to invalidate ReviewCoversLive")
+	}
+	merged := live
+	merged.State = StateMerged
+	if ReviewCoversLive(rv, merged, "2026-11-20T11:00:00Z", "2026-11-20T11:30:00Z") {
+		t.Fatal("expected terminal PR to return false")
+	}
+}
+
+func TestMyReviewSubmittedAutoMovesToWaitingOrReady(t *testing.T) {
+	// Submitting a review from Inbox, In Progress, or Updates clears unread
+	// state and moves the card to Waiting when the PR is not ready to merge.
+	for _, fromRole := range []string{RoleInbox, RoleInProgress, RoleUpdates} {
+		live := openPR()
+		live.ReviewComments++
+		live.ReviewDecision = ReviewChangesRequested
+		track := Ack(openPR())
+		track.HasUnread = true
+		track.Unread = 2
+		track.Cycles = 1
+		track.Summary = "Author pushed +1 commit"
+
+		res := Evaluate(Input{
+			Live:              live,
+			Track:             track,
+			AutoMove:          true,
+			ColumnRole:        fromRole,
+			Kind:              KindPR,
+			HasActorData:      true,
+			MyReviewSubmitted: true,
+			MyReviewState:     MyReviewChangesRequested,
+		})
+		if res.MoveToRole != RoleWaiting {
+			t.Errorf("from %q: MoveToRole = %q, want %q", fromRole, res.MoveToRole, RoleWaiting)
+		}
+		if res.Track.HasUnread || res.Track.Unread != 0 || res.Track.Cycles != 0 || res.Track.Summary != "" {
+			t.Errorf("from %q: unread not cleared: %+v", fromRole, res.Track)
+		}
+		if len(res.Events) != 1 || res.Events[0] != "Your review submitted (changes requested); baseline updated" {
+			t.Errorf("from %q: events = %v", fromRole, res.Events)
+		}
+	}
+
+	// Approving when PR is approved + CI green + 0 unresolved threads moves directly to Ready.
+	approvedGreen := openPR()
+	approvedGreen.ReviewDecision = ReviewApproved
+	approvedGreen.CI = CISuccess
+	res := Evaluate(Input{
+		Live:              approvedGreen,
+		Track:             Ack(openPR()),
+		AutoMove:          true,
+		ColumnRole:        RoleInProgress,
+		Kind:              KindPR,
+		HasActorData:      true,
+		MyReviewSubmitted: true,
+		MyReviewState:     MyReviewApproved,
+	})
+	if res.MoveToRole != RoleReady {
+		t.Fatalf("approved+green: MoveToRole = %q, want %q", res.MoveToRole, RoleReady)
+	}
+
+	// Approving while CI is pending moves to Waiting first, then CI turning green moves to Ready.
+	approvedPending := openPR()
+	approvedPending.ReviewDecision = ReviewApproved
+	approvedPending.CI = CIPending
+	res = Evaluate(Input{
+		Live:              approvedPending,
+		Track:             Ack(openPR()),
+		AutoMove:          true,
+		ColumnRole:        RoleInProgress,
+		Kind:              KindPR,
+		HasActorData:      true,
+		MyReviewSubmitted: true,
+		MyReviewState:     MyReviewApproved,
+	})
+	if res.MoveToRole != RoleWaiting {
+		t.Fatalf("approved+pending: MoveToRole = %q, want %q", res.MoveToRole, RoleWaiting)
+	}
+	res2 := Evaluate(Input{
+		Live:         approvedGreen,
+		Track:        res.Track,
+		AutoMove:     true,
+		ColumnRole:   RoleWaiting,
+		Kind:         KindPR,
+		HasActorData: true,
+	})
+	if res2.MoveToRole != RoleReady {
+		t.Fatalf("ci finished after approval: MoveToRole = %q, want %q", res2.MoveToRole, RoleReady)
+	}
+
+	// AutoMove disabled still re-baselines and clears unread without moving.
+	resNoMove := Evaluate(Input{
+		Live:              openPR(),
+		Track:             Tracking{Ack: openPR(), Prev: openPR(), HasUnread: true, Unread: 1, Cycles: 1},
+		AutoMove:          false,
+		ColumnRole:        RoleUpdates,
+		Kind:              KindPR,
+		HasActorData:      true,
+		MyReviewSubmitted: true,
+		MyReviewState:     MyReviewLGTM,
+	})
+	if resNoMove.MoveToRole != "" || resNoMove.Track.HasUnread {
+		t.Fatalf("AutoMove=false result = %+v", resNoMove)
+	}
+}
+
 func TestColumnsOutsideTheAutomationFlowAreLeftAlone(t *testing.T) {
 	for _, role := range []string{"", RoleDone} {
 		tr := newTracker(t, role)

@@ -377,3 +377,16 @@ func EvaluateReview(in ReviewInput) ReviewStatus {
 	out.Stale = pushed || After(in.LastOtherActivityAt, at)
 	return out
 }
+
+// ReviewCoversLive reports whether a GitHub review submission covers the
+// current head commit and latest non-self human activity on an open PR.
+func ReviewCoversLive(rv MyReview, live Snapshot, lastCommitAt, lastOtherActivityAt string) bool {
+	if rv.State == "" || IsTerminal(live.State) {
+		return false
+	}
+	pushed := After(lastCommitAt, rv.At)
+	if rv.CommitSHA != "" && live.HeadSHA != "" {
+		pushed = rv.CommitSHA != live.HeadSHA
+	}
+	return !pushed && !After(lastOtherActivityAt, rv.At)
+}

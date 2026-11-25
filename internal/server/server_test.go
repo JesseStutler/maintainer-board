@@ -1185,6 +1185,73 @@ func TestPersonalReviewFromGitHub(t *testing.T) {
 	}
 }
 
+func TestSubmittedReviewAutoMovesToWaitingOnce(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "JesseStutler"
+	const key = "volcano-sh/volcano#6247"
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.HasActorData = true
+		it.LastCommitAt, it.LastOtherActivityAt = longAgo, longAgo
+	})
+	id := hn.newLinkedCard("in_progress")
+	sync := func() *db.Card {
+		t.Helper()
+		hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
+		return hn.card(id)
+	}
+
+	// 1. Maintainer submits CHANGES_REQUESTED on GitHub: auto-moves from In Progress to Waiting.
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.Snapshot.ReviewComments++
+		it.Snapshot.ReviewDecision = github.ReviewChangesRequested
+		it.MyReview = github.MyReview{State: github.MyReviewChangesRequested, At: reviewAt, CommitSHA: "aaa"}
+	})
+	c := sync()
+	if c.ColumnID != "waiting" || c.GHMyReviewState != github.MyReviewChangesRequested || c.GHIsStaleReview || c.HasUnreadUpdates {
+		t.Fatalf("after submitting review = col:%q state:%q stale:%v unread:%v", c.ColumnID, c.GHMyReviewState, c.GHIsStaleReview, c.HasUnreadUpdates)
+	}
+
+	// 2. Maintainer drags the card back to In Progress: next poll must NOT pull it back to Waiting.
+	hn.must(200, "PATCH", "/api/cards/"+id, map[string]any{"columnId": "in_progress"})
+	if c = sync(); c.ColumnID != "in_progress" {
+		t.Fatalf("poll fought manual move: col = %q, want in_progress", c.ColumnID)
+	}
+
+	// 3. Author pushes a commit and replies: card moves to Updates with stale review.
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.Snapshot.Commits, it.Snapshot.HeadSHA, it.LastCommitAt = 2, "bbb", farFuture
+		it.Snapshot.Comments++
+		it.LastOtherActivityAt = farFuture
+		it.OtherActivities = []github.Activity{{Author: "mohit", At: farFuture}}
+	})
+	c = sync()
+	if c.ColumnID != "updates" || !c.HasUnreadUpdates || !c.GHIsStaleReview {
+		t.Fatalf("after author push = col:%q unread:%v stale:%v", c.ColumnID, c.HasUnreadUpdates, c.GHIsStaleReview)
+	}
+
+	// 4. Maintainer finishes the 2nd review covering head "bbb": clears unread and moves to Waiting.
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.Snapshot.ReviewComments++
+		it.MyReview = github.MyReview{State: github.MyReviewCommented, At: evenLater, CommitSHA: "bbb"}
+	})
+	c = sync()
+	if c.ColumnID != "waiting" || c.HasUnreadUpdates || c.GHIsStaleReview || c.GHMyReviewState != github.MyReviewCommented {
+		t.Fatalf("after 2nd review = col:%q unread:%v stale:%v state:%q", c.ColumnID, c.HasUnreadUpdates, c.GHIsStaleReview, c.GHMyReviewState)
+	}
+
+	// 5. If the author pushes again *after* a review before sync runs, the review
+	//    does not cover the live head: card must move to Updates, not Waiting.
+	hn.must(200, "PATCH", "/api/cards/"+id, map[string]any{"columnId": "in_progress"})
+	hn.gh.updateItem(key, func(it *github.Item) {
+		it.MyReview = github.MyReview{State: github.MyReviewCommented, At: "2099-01-03T00:00:00Z", CommitSHA: "bbb"}
+		it.Snapshot.Commits, it.Snapshot.HeadSHA, it.LastCommitAt = 3, "ccc", "2099-01-04T00:00:00Z"
+	})
+	c = sync()
+	if c.ColumnID != "updates" || !c.HasUnreadUpdates || !c.GHIsStaleReview {
+		t.Fatalf("stale review should surface in updates: col:%q unread:%v stale:%v", c.ColumnID, c.HasUnreadUpdates, c.GHIsStaleReview)
+	}
+}
+
 func TestMarkReviewedByHand(t *testing.T) {
 	hn := newHarness(t)
 	hn.srv.cfg.CurrentUser = "JesseStutler"
