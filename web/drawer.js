@@ -2288,9 +2288,41 @@ async function sendMessage() {
   }
 }
 
+function latestUserPrompt(chat) {
+  if (!chat) return '';
+  if (chat.pending && chat.pending.length > 0) {
+    return (chat.pending[chat.pending.length - 1].text || '').trim();
+  }
+  let best = null;
+  for (const item of chat.items.values()) {
+    if (item.kind === 'activity' || item.role !== 'user' || !item.text) continue;
+    const seq = item.sequence || 0;
+    const bestSeq = best ? best.sequence || 0 : -1;
+    if (!best || seq > bestSeq || (seq === bestSeq && String(item.createdAt || '') > String(best.createdAt || ''))) {
+      best = item;
+    }
+  }
+  return best ? best.text.trim() : '';
+}
+
 async function interrupt() {
-  await api.post(sessionPath(ctx.sessionId, '/interrupt'));
-  toast('Interrupt sent.', 'info');
+  const active = ctx;
+  const prompt = latestUserPrompt(active && active.chat);
+  await api.post(sessionPath(active.sessionId, '/interrupt'));
+  let restored = false;
+  if (ctx === active && active.els.composerInput) {
+    if (active.chat) active.chat.awaiting = null;
+    if (prompt && !active.els.composerInput.value.trim()) {
+      active.els.composerInput.value = prompt;
+      sessionStorageSet(active.sessionId, prompt);
+      autoGrow(active.els.composerInput);
+      updateComposer();
+      active.els.composerInput.focus();
+      active.els.composerInput.setSelectionRange(prompt.length, prompt.length);
+      restored = true;
+    }
+  }
+  toast(restored ? 'Interrupt sent; prompt restored to input.' : 'Interrupt sent.', 'info');
   onRefresh();
 }
 
