@@ -358,19 +358,31 @@ function build(card) {
       updateComposer();
     });
     els.composerInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        sendMessage();
+        const start = els.composerInput.selectionStart;
+        const end = els.composerInput.selectionEnd;
+        const val = els.composerInput.value;
+        els.composerInput.value = `${val.slice(0, start)}\n${val.slice(end)}`;
+        els.composerInput.selectionStart = els.composerInput.selectionEnd = start + 1;
+        autoGrow(els.composerInput);
+        sessionStorageSet(ctx.sessionId, els.composerInput.value);
+        updateComposer();
+        return;
       }
+      if (e.shiftKey) return;
+      e.preventDefault();
+      sendMessage();
     });
-    els.send = h('button', { class: 'btn btn-primary btn-sm', type: 'button', title: 'Send (Ctrl+Enter)', onClick: sendMessage }, icon('send', 13), h('span', null, 'Send'));
+    els.send = h('button', { class: 'btn btn-primary btn-sm', type: 'button', title: 'Send (Enter)', onClick: sendMessage }, icon('send', 13), h('span', null, 'Send'));
     els.stop = h(
       'button',
       { class: 'btn btn-sm btn-danger', type: 'button', hidden: true, title: 'Interrupt the running turn', onClick: (e) => withBusy(e.currentTarget, interrupt, null, 'Stopping...') },
       icon('stop', 13),
       h('span', null, 'Stop'),
     );
-    els.composerHint = h('span', { class: 'hint composer-hint' }, 'Ctrl+Enter to send');
+    els.composerHint = h('span', { class: 'hint composer-hint' }, 'Enter to send, Ctrl+Enter for newline');
     // Model, effort and approval mode of the next turn; filled by loadSessionModels().
     els.model = h('select', { class: 'select select-sm', 'aria-label': 'Model', title: 'Model for the next turn of this session', disabled: true }, h('option', { value: '' }, 'Model'));
     els.effort = h('select', { class: 'select select-sm', 'aria-label': 'Effort', title: 'Reasoning effort for the next turn', hidden: true });
@@ -1883,7 +1895,7 @@ function updateComposer() {
   }
   els.send.disabled = !sendable || ctx.sending || els.composerInput.value.trim() === '';
   els.stop.hidden = !isSessionActive(card);
-  els.composerHint.textContent = isSessionActive(card) ? `${harness} is working. New messages are queued by AO.` : 'Ctrl+Enter to send';
+  els.composerHint.textContent = isSessionActive(card) ? `${harness} is working. New messages are queued by AO.` : 'Enter to send, Ctrl+Enter for newline';
 }
 
 // Chat
