@@ -1,5 +1,6 @@
-// Command maintainer-board serves a kanban board for maintainer work that
-// sits on top of a local agent-orchestrator (AO) daemon and the gh CLI.
+// Command maintainer-board serves a standalone Kanban workspace for open-source
+// maintainers backed by native codex/copilot CLIs (or an optional AO daemon)
+// and the gh CLI.
 package main
 
 import (
