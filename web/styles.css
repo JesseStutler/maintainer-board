@@ -1830,6 +1830,26 @@ body.drawer-open .board {
   white-space: nowrap;
 }
 
+.agent-sid {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--border-muted);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-subtle);
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s var(--ease), border-color 0.12s var(--ease);
+}
+
+.agent-sid:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
 .brand-icon {
   color: var(--text-muted);
 }
@@ -2061,7 +2081,27 @@ body.is-resizing .drawer {
 
 .drawer-session .session-id {
   color: var(--text-muted);
-  font-size: 12.5px;
+  font-size: 12px;
+  user-select: all;
+}
+
+.drawer-session .session-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+
+.drawer-session .session-copy:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 .drawer-controls {
@@ -3037,12 +3077,19 @@ details.section[open] > summary .icon {
 
 .activity {
   display: flex;
-  align-items: center;
-  gap: 7px;
+  flex-direction: column;
+  gap: 4px;
   margin: 0 0 9px;
   padding: 2px 0;
   color: var(--text-subtle);
   font-size: 12.5px;
+  min-width: 0;
+}
+
+.activity-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -3056,6 +3103,47 @@ details.section[open] > summary .icon {
   flex: none;
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.activity-output-wrap {
+  margin-left: 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.activity-output {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 75%, var(--bg));
+  border: 1px solid var(--border-muted);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.activity-toggle {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.activity-toggle:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 .activity.is-failed {

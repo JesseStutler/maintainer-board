@@ -29,8 +29,10 @@ type SessionPR struct {
 }
 
 type Session struct {
-	ID            string       `json:"id"`
-	ProjectID     string       `json:"projectId"`
+	ID              string       `json:"id"`
+	NativeSessionID string       `json:"nativeSessionId,omitempty"`
+	CWD             string       `json:"cwd,omitempty"`
+	ProjectID       string       `json:"projectId"`
 	Kind          string       `json:"kind"`
 	Harness       string       `json:"harness"`
 	DisplayName   string       `json:"displayName"`

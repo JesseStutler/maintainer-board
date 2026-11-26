@@ -1,6 +1,6 @@
 // Kanban board rendering and drag-and-drop.
 
-import { h, relTime, plural } from './util.js';
+import { h, relTime, plural, copyText } from './util.js';
 import { icon, brandIcon } from './icons.js';
 import { api, cardPath } from './api.js';
 import { toast, toastError } from './ui.js';
@@ -143,22 +143,43 @@ function chip(tone, label, iconName, title) {
 
 const CHIP_TONES = { 'is-success': 'success', 'is-danger': 'danger', 'is-warning': 'warning', 'is-merged': 'merged', 'is-you': 'you' };
 
+function shortSessionId(id) {
+  if (!id) return '';
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id)) return id.slice(0, 8);
+  return id.length > 14 ? `${id.slice(0, 12)}...` : id;
+}
+
 /**
- * Agent badge of the card footer: brand mark, agent name and live state.
- * The AO session ID is deliberately kept off the card face; it is in the
- * tooltip here and in the header of the card workspace.
+ * Agent badge of the card footer: brand mark, agent name, live state,
+ * and a click-to-copy short session ID for quick local lookup/resume.
  */
 function agentBadge(card) {
   if (!card.aoSessionId) return null;
   const info = activityInfo(card);
   const harness = card.session ? card.session.harness : '';
   const name = card.session ? harnessLabel(harness) : 'Agent';
+  const fullId = card.aoSessionId;
+  const sidBtn = h(
+    'button',
+    {
+      type: 'button',
+      class: 'agent-sid mono',
+      title: `Session ID: ${fullId} (click to copy)`,
+      'aria-label': `Copy session ID ${fullId}`,
+      onClick: async (e) => {
+        e.stopPropagation();
+        if (await copyText(fullId)) toast(`Copied session ID ${fullId}`, 'success');
+      },
+    },
+    shortSessionId(fullId),
+  );
   return h(
     'span',
-    { class: ['agent', `agent-${harness || 'other'}`], title: `${name} session ${card.aoSessionId}: ${info.label}`, dataset: { harness: harness || 'other' } },
+    { class: ['agent', `agent-${harness || 'other'}`], title: `${name} session ${fullId}: ${info.label}`, dataset: { harness: harness || 'other' } },
     brandIcon(harness, 15),
     h('span', { class: 'agent-name' }, name),
     h('span', { class: 'agent-state' }, h('span', { class: `state-dot ${info.cls}` }), h('span', null, info.label)),
+    sidBtn,
   );
 }
 

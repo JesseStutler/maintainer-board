@@ -2,7 +2,7 @@
 // and the embedded AO chat. It opens as a resizable side drawer next to the
 // board and expands to a full-width, two-pane workspace on demand.
 
-import { h, clear, relTime, fmtDateTime, fmtClock, uuid, autoGrow, plural, storageGet, storageSet } from './util.js';
+import { h, clear, relTime, fmtDateTime, fmtClock, uuid, autoGrow, plural, storageGet, storageSet, copyText } from './util.js';
 import { icon, brandIcon } from './icons.js';
 import { api, cardPath, sessionPath } from './api.js';
 import { renderMarkdown } from './markdown.js';
@@ -696,11 +696,28 @@ function renderTop(card) {
   els.sessionChip.hidden = !card.aoSessionId;
   if (card.aoSessionId) {
     const harness = card.session ? card.session.harness : '';
-    els.sessionChip.title = `AO session ${card.aoSessionId}`;
+    const isNative = card.session && card.session.mode === 'native';
+    const cwdNote = card.session && card.session.cwd ? ` (${card.session.cwd})` : '';
+    const fullId = card.aoSessionId;
+    els.sessionChip.title = `${isNative ? 'Native' : 'AO'} session ${fullId}${cwdNote}`;
     els.sessionChip.replaceChildren(
       brandIcon(harness, 16),
       h('span', { class: 'session-harness' }, card.session ? harnessLabel(harness) : 'Agent'),
-      h('span', { class: 'mono session-id' }, card.aoSessionId),
+      h('span', { class: 'mono session-id' }, fullId),
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'session-copy',
+          title: `Copy session ID (${fullId})`,
+          'aria-label': `Copy session ID ${fullId}`,
+          onClick: async (e) => {
+            e.stopPropagation();
+            if (await copyText(fullId)) toast(`Copied session ID ${fullId}`, 'success');
+          },
+        },
+        icon('copy', 12),
+      ),
     );
   }
 
@@ -1461,7 +1478,7 @@ function renderAgentStart(card) {
     h(
       'div',
       { class: 'panel start-session' },
-      h('div', { class: 'row' }, harness, project, h('span', { class: 'hint' }, 'Starts a new AO worker session in chat mode.')),
+      h('div', { class: 'row' }, harness, project, h('span', { class: 'hint' }, 'Starts a native CLI session directly in your workspace.')),
       h('div', { class: 'row' }, h('label', { class: 'inline-field' }, h('span', { class: 'hint' }, 'Model'), picker.model), effortWrap, h('label', { class: 'inline-field' }, h('span', { class: 'hint' }, 'Permissions'), approval)),
       prompt,
       h('div', { class: 'row' }, start),
@@ -1515,10 +1532,14 @@ function renderSessionBar(card) {
     );
   }
   if (session) {
+    const isNative = session.mode === 'native';
+    const infoTip = isNative
+      ? `Native ${harnessLabel(session.harness)} CLI session${session.cwd ? ` in ${session.cwd}` : ''}. Copy the Session ID to search or resume locally; conversation history stays in sync.`
+      : 'This is the same live session shown in AO desktop. Messages sent here appear there, and the other way around.';
     nodes.push(
       h(
         'span',
-        { class: 'session-info', tabindex: '0', title: 'This is the same live session shown in AO desktop. Messages sent here appear there, and the other way around.' },
+        { class: 'session-info', tabindex: '0', title: infoTip },
         icon('info', 14),
       ),
     );
@@ -2061,19 +2082,83 @@ function renderMessage(message, card, chat) {
   );
 }
 
-function renderActivity(activity) {
+const ACTIVITY_PREVIEW_LINES = 5;
+
+function activityDetailObj(activity) {
+  if (!activity || !activity.detail) return null;
+  if (typeof activity.detail === 'object') return activity.detail;
+  try {
+    return JSON.parse(activity.detail);
+  } catch (err) {
+    return null;
+  }
+}
+
+function renderActivity(activity, chat) {
   const done = activity.status === 'completed' || activity.status === 'resolved' || activity.status === 'recovered';
-  return h(
+  const detail = activityDetailObj(activity);
+  const rawOutput = detail && typeof detail.output === 'string' ? detail.output.trimEnd() : '';
+  const fullCmd = detail && typeof detail.command === 'string' ? detail.command.trim() : '';
+  const exitCode = detail && typeof detail.exitCode === 'number' ? detail.exitCode : null;
+
+  const head = h(
     'div',
-    { class: `activity is-${activity.status}`, title: `${activity.activityKind.replace(/_/g, ' ')}: ${activity.summary}` },
+    { class: 'activity-head', title: fullCmd || `${activity.activityKind.replace(/_/g, ' ')}: ${activity.summary}` },
     icon(ACTIVITY_ICONS[activity.activityKind] || 'info', 12),
     h('span', { class: 'label' }, activity.summary || activity.activityKind.replace(/_/g, ' ')),
+    exitCode !== null && exitCode !== 0 ? h('span', { class: 'status' }, `exit ${exitCode}`) : null,
     done ? null : h('span', { class: 'status' }, activity.status),
+  );
+
+  if (!rawOutput) {
+    return h('div', { class: `activity is-${activity.status}` }, head);
+  }
+
+  const expandKey = `act:${activity.id}`;
+  const isExpanded = Boolean(chat && chat.expanded.has(expandKey));
+  const lines = rawOutput.split('\n');
+  const overflow = lines.length > ACTIVITY_PREVIEW_LINES;
+  let visibleText = rawOutput;
+  if (overflow && !isExpanded) {
+    // While running, show the latest lines (tail); once finished, show the first lines.
+    const slice = activity.status === 'running' ? lines.slice(-ACTIVITY_PREVIEW_LINES) : lines.slice(0, ACTIVITY_PREVIEW_LINES);
+    visibleText = slice.join('\n');
+  }
+
+  const extraCount = lines.length - ACTIVITY_PREVIEW_LINES;
+  const toggleBtn = overflow
+    ? h(
+        'button',
+        {
+          type: 'button',
+          class: 'activity-toggle',
+          onClick: () => {
+            if (!chat) return;
+            if (isExpanded) chat.expanded.delete(expandKey);
+            else chat.expanded.add(expandKey);
+            chat.nodes.delete(activity.id);
+            renderChat(true);
+          },
+        },
+        isExpanded ? 'Collapse output' : `+${extraCount} more line${extraCount === 1 ? '' : 's'}`,
+      )
+    : null;
+
+  return h(
+    'div',
+    { class: `activity activity-block is-${activity.status}` },
+    head,
+    h('div', { class: 'activity-output-wrap' }, h('pre', { class: 'activity-output mono' }, visibleText), toggleBtn),
   );
 }
 
-function itemKey(item) {
-  if (item.kind === 'activity') return `a|${item.revision}|${item.status}|${item.summary}`;
+function itemKey(item, chat) {
+  if (item.kind === 'activity') {
+    const detail = activityDetailObj(item);
+    const outLen = detail && typeof detail.output === 'string' ? detail.output.length : 0;
+    const exp = chat && chat.expanded.has(`act:${item.id}`) ? 1 : 0;
+    return `a|${item.revision}|${item.status}|${item.summary}|${outLen}|${exp}`;
+  }
   return `m|${item.revision}|${(item.text || '').length}|${item.streaming}`;
 }
 
@@ -2100,10 +2185,10 @@ function renderChat(keepScroll = false) {
   const live = new Set();
   for (const item of items) {
     live.add(item.id);
-    const key = itemKey(item);
+    const key = itemKey(item, chat);
     let entry = chat.nodes.get(item.id);
     if (!entry || entry.key !== key) {
-      entry = { key, el: item.kind === 'activity' ? renderActivity(item) : renderMessage(item, card, chat) };
+      entry = { key, el: item.kind === 'activity' ? renderActivity(item, chat) : renderMessage(item, card, chat) };
       chat.nodes.set(item.id, entry);
     }
     desired.push(entry.el);

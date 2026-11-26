@@ -21,6 +21,7 @@ import (
 	"maintainer-board/internal/db"
 	"maintainer-board/internal/github"
 	"maintainer-board/internal/history"
+	"maintainer-board/internal/native"
 	"maintainer-board/internal/server"
 	"maintainer-board/internal/summary"
 	"maintainer-board/web"
@@ -47,8 +48,10 @@ func run() error {
 	var (
 		addr           = flag.String("addr", "127.0.0.1:3012", "listen address")
 		dbPath         = flag.String("db", "./data/board.db", "SQLite database path")
-		aoURL          = flag.String("ao-url", "http://127.0.0.1:3001", "base URL of the local AO daemon")
-		aoProject      = flag.String("ao-project", "", "AO project for new agent sessions (default: the first project AO reports)")
+		runtimeMode    = flag.String("runtime", "native", "agent runtime: native (direct codex/copilot CLI, default) or ao (legacy AO daemon)")
+		workspaces     = flag.String("workspace", "", "comma-separated local workspace paths for native mode (default: current directory)")
+		aoURL          = flag.String("ao-url", "http://127.0.0.1:3001", "base URL of the local AO daemon (used with --runtime=ao)")
+		aoProject      = flag.String("ao-project", "", "project for new agent sessions (default: the first workspace or AO project)")
 		defaultRepo    = flag.String("default-repo", "volcano-sh/volcano", "repository used for bare #123 references")
 		syncInterval   = flag.Duration("sync-interval", 120*time.Second, "GitHub background sync interval")
 		aoSyncInterval = flag.Duration("ao-sync-interval", 5*time.Second, "AO session sync interval")
@@ -129,18 +132,49 @@ func run() error {
 	ai.SummaryEffort = strings.TrimSpace(*summaryEffort)
 	ai.CopilotPath, ai.CodexPath = strings.TrimSpace(*copilotPath), strings.TrimSpace(*codexPath)
 
+	histIdx := history.New(*historyHome)
+	var (
+		agentClient server.AOClient
+		nativeMgr   *native.Manager
+		runtimeInfo string
+	)
+	switch strings.ToLower(strings.TrimSpace(*runtimeMode)) {
+	case "native", "":
+		mgr, err := native.New(native.Config{
+			DataDir:             filepath.Dir(*dbPath),
+			HomeDir:             strings.TrimSpace(*historyHome),
+			Workspaces:          splitList(*workspaces),
+			CodexPath:           strings.TrimSpace(*codexPath),
+			CopilotPath:         strings.TrimSpace(*copilotPath),
+			DefaultApprovalMode: strings.TrimSpace(*approvalMode),
+			History:             histIdx,
+			Logger:              logger,
+		})
+		if err != nil {
+			return fmt.Errorf("init native runtime: %w", err)
+		}
+		nativeMgr = mgr
+		agentClient = mgr
+		runtimeInfo = "native"
+	case "ao":
+		agentClient = ao.New(*aoURL)
+		runtimeInfo = *aoURL
+	default:
+		return fmt.Errorf("invalid --runtime %q: expected native or ao", *runtimeMode)
+	}
+
 	srv := server.New(server.Config{
 		DefaultRepo:        *defaultRepo,
-		AOURL:              *aoURL,
+		AOURL:              runtimeInfo,
 		AOProject:          *aoProject,
 		ApprovalMode:       strings.TrimSpace(*approvalMode),
 		GitHubSyncInterval: *syncInterval,
 		AOSyncInterval:     *aoSyncInterval,
 		AllowedHosts:       splitList(*allowedHosts),
 		CurrentUser:        strings.TrimPrefix(strings.TrimSpace(*ghUser), "@"),
-		History:            history.New(*historyHome),
+		History:            histIdx,
 		HelperDir:          helperDir,
-	}, store, ao.New(*aoURL), gh, ai, web.Files, logger)
+	}, store, agentClient, gh, ai, web.Files, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -158,7 +192,7 @@ func run() error {
 	}
 
 	srv.Start(ctx)
-	logger.Info("maintainer-board listening", "url", "http://"+listener.Addr().String(), "db", *dbPath, "ao", *aoURL, "repo", *defaultRepo, "user", gh.User())
+	logger.Info("maintainer-board listening", "url", "http://"+listener.Addr().String(), "db", *dbPath, "runtime", runtimeInfo, "repo", *defaultRepo, "user", gh.User())
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
@@ -167,6 +201,9 @@ func run() error {
 	case err := <-serveErr:
 		stop()
 		srv.Wait()
+		if nativeMgr != nil {
+			nativeMgr.Close()
+		}
 		return err
 	case <-ctx.Done():
 	}
@@ -177,5 +214,8 @@ func run() error {
 		_ = httpServer.Close()
 	}
 	srv.Wait()
+	if nativeMgr != nil {
+		nativeMgr.Close()
+	}
 	return nil
 }
