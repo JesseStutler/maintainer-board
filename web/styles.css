@@ -1550,6 +1550,35 @@ body.drawer-open .board {
   letter-spacing: 0.03em;
 }
 
+.gh-more-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.gh-more-pill.has-updates {
+  border-color: var(--warning-border);
+  background: var(--warning-subtle);
+  color: var(--warning-text);
+}
+
+.column.is-compact .gh-more-pill {
+  height: 17px;
+  padding: 0 4px;
+  font-size: 10.5px;
+}
+
 .card-author {
   display: inline-flex;
   align-items: center;
@@ -2564,6 +2593,29 @@ body.is-resizing .drawer {
 .gh-link-form {
   display: flex;
   gap: 6px;
+}
+
+.gh-link-add {
+  margin-top: 2px;
+}
+
+.gh-link-add .input-sm {
+  height: 28px;
+  font-size: 12.5px;
+}
+
+.gh-link-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.badge-primary-link {
+  background: var(--subtle);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
 }
 
 .gh-strip {

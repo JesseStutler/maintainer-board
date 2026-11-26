@@ -213,6 +213,29 @@ func myReview(user string, reviews []ghReview, comments []ghComment) MyReview {
 	return out
 }
 
+// myIssueComment records the current user's latest comment on someone else's
+// issue so issue discussions participate in Waiting/Updates tracking just like
+// pull request reviews.
+func myIssueComment(user string, comments []ghComment) MyReview {
+	if user == "" {
+		return MyReview{}
+	}
+	var latest time.Time
+	raw := ""
+	for _, cm := range comments {
+		if !sameUser(cm.Author.Login, user) {
+			continue
+		}
+		if t, ok := parseTime(cm.CreatedAt); ok && t.After(latest) {
+			latest, raw = t, cm.CreatedAt
+		}
+	}
+	if raw == "" {
+		return MyReview{}
+	}
+	return MyReview{State: MyReviewCommented, At: raw}
+}
+
 // lastOtherActivity returns the time of the newest comment, inline review
 // comment, or submitted review written by a person other than user, or ""
 // when there is none.

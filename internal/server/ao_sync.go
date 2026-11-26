@@ -308,22 +308,35 @@ func (s *Server) createSessionCard(ctx context.Context, sess ao.Session) (*db.Ca
 		Kind:    db.EventCreated,
 		Message: fmt.Sprintf("Card created from AO session %s (%s)", sess.ID, harnessLabel(sess.Harness)),
 	}}
-	// Link the pull request AO already attached to the session, or a
-	// reference mentioned in its title such as "[PR #6247]".
-	var ref github.Ref
-	linked := false
+	// Link pull requests AO already attached to the session, plus any PR or
+	// issue references mentioned in its title such as "#6081 #6196".
 	defaultRepo := s.defaultRepo(ctx)
-	if len(sess.PRs) > 0 && sess.PRs[0].URL != "" {
-		if parsed, err := github.ParseRef(sess.PRs[0].URL, defaultRepo); err == nil {
-			ref, linked = parsed, true
+	var refs []github.Ref
+	seenRefs := map[string]bool{}
+	addRef := func(r github.Ref) {
+		key := fmt.Sprintf("%s#%d", strings.ToLower(r.Repo), r.Number)
+		if !seenRefs[key] {
+			seenRefs[key] = true
+			refs = append(refs, r)
 		}
 	}
-	if !linked {
-		ref, linked = github.FindRef(sess.DisplayName, defaultRepo)
+	for _, pr := range sess.PRs {
+		if pr.URL != "" {
+			if parsed, err := github.ParseRef(pr.URL, defaultRepo); err == nil {
+				addRef(parsed)
+			}
+		}
 	}
+	for _, found := range github.FindRefs(sess.DisplayName, defaultRepo) {
+		addRef(found)
+	}
+	linked := len(refs) > 0
 	if linked {
-		card.GHRepo, card.GHNumber = ref.Repo, ref.Number
-		events = append(events, db.EventInput{Kind: db.EventGitHub, Message: "Auto-detected GitHub reference " + ref.String()})
+		for _, ref := range refs {
+			card.GHLinks = append(card.GHLinks, db.CardLink{Repo: ref.Repo, Number: ref.Number})
+			events = append(events, db.EventInput{Kind: db.EventGitHub, Message: "Auto-detected GitHub reference " + ref.String()})
+		}
+		recomputeCardGitHub(card, defaultRepo)
 	}
 	card, err = s.store.CreateCard(ctx, card, events...)
 	if err != nil {
@@ -334,7 +347,7 @@ func (s *Server) createSessionCard(ctx context.Context, sess ao.Session) (*db.Ca
 		id := card.ID
 		s.goBackground(func(ctx context.Context) {
 			if _, _, err := s.syncCard(ctx, id); err != nil {
-				s.log.Warn("initial github sync failed", "card", id, "ref", ref.String(), "err", err)
+				s.log.Warn("initial github sync failed", "card", id, "err", err)
 			}
 			s.hub.Publish()
 		})
@@ -785,31 +798,39 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 // Summaries
 
 func githubContext(c *db.Card) string {
-	if c.GHNumber == 0 {
+	links := c.GHLinks
+	if len(links) == 0 && c.GHNumber != 0 {
+		links = []db.CardLink{db.LinkFromCard(c)}
+	}
+	if len(links) == 0 {
 		return ""
 	}
-	parts := []string{fmt.Sprintf("%s %s#%d", kindLabel(c.GHKind), c.GHRepo, c.GHNumber)}
-	if c.GHTitle != "" {
-		parts = append(parts, fmt.Sprintf("titled %q", c.GHTitle))
-	}
-	if c.GHAuthor != "" {
-		parts = append(parts, "by "+c.GHAuthor)
-	}
-	if c.GHState != "" {
-		parts = append(parts, "state "+c.GHState)
-	}
-	if c.GHKind == github.KindPR {
-		if c.GHCIStatus != "" {
-			parts = append(parts, "CI "+c.GHCIStatus)
+	var lines []string
+	for _, l := range links {
+		parts := []string{fmt.Sprintf("%s %s#%d", kindLabel(l.Kind), l.Repo, l.Number)}
+		if l.Title != "" {
+			parts = append(parts, fmt.Sprintf("titled %q", l.Title))
 		}
-		if c.GHReviewDecision != "" {
-			parts = append(parts, "review "+c.GHReviewDecision)
+		if l.Author != "" {
+			parts = append(parts, "by "+l.Author)
 		}
+		if l.State != "" {
+			parts = append(parts, "state "+l.State)
+		}
+		if l.Kind == github.KindPR {
+			if l.CIStatus != "" {
+				parts = append(parts, "CI "+l.CIStatus)
+			}
+			if l.ReviewDecision != "" {
+				parts = append(parts, "review "+l.ReviewDecision)
+			}
+		}
+		if l.HasUnreadUpdates && l.UpdateSummary != "" {
+			parts = append(parts, "unreviewed updates: "+l.UpdateSummary)
+		}
+		lines = append(lines, strings.Join(parts, ", "))
 	}
-	if c.HasUnreadUpdates && c.UpdateSummary != "" {
-		parts = append(parts, "unreviewed updates: "+c.UpdateSummary)
-	}
-	return strings.Join(parts, ", ")
+	return strings.Join(lines, "\n")
 }
 
 // describer is implemented by GitHub clients that can fetch the body of a

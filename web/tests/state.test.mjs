@@ -246,3 +246,51 @@ test('per-column and global compact mode toggling', () => {
   assert.equal(isColumnCompact('waiting'), false);
   assert.equal(isColumnCompact('done'), false);
 });
+
+test('issue review labels and multi-link search/attention', () => {
+  setBoard([]);
+  const repliedIssue = pr({
+    ghKind: 'issue',
+    ghNumber: 6100,
+    ghMyReviewState: 'COMMENTED',
+    ghIsStaleReview: false,
+  });
+  assert.deepEqual(
+    [myReviewInfo(repliedIssue).kind, myReviewInfo(repliedIssue).label],
+    ['current', 'You: Replied'],
+  );
+
+  const staleIssue = pr({
+    ghKind: 'issue',
+    ghNumber: 6100,
+    ghMyReviewState: 'COMMENTED',
+    ghIsStaleReview: true,
+    ghPendingFeedback: '@reporter commented',
+  });
+  assert.deepEqual(
+    [myReviewInfo(staleIssue).kind, myReviewInfo(staleIssue).label],
+    ['stale', '@reporter commented'],
+  );
+
+  // Multi-link card: searchable by secondary link number/author and bubbles up in unread sort.
+  const multi = pr({
+    id: 'multi',
+    position: 1,
+    ghNumber: 6081,
+    ghAuthor: 'alice',
+    ghUpdatedAt: '2026-11-20T00:00:00Z',
+    ghLinks: [
+      { id: 'l1', repo: 'volcano-sh/volcano', number: 6081, kind: 'pr', author: 'alice', state: 'OPEN', lastSyncedAt: '2026-11-25T01:00:00Z' },
+      { id: 'l2', repo: 'volcano-sh/volcano', number: 6196, kind: 'issue', author: 'JesseStutler', state: 'OPEN', lastSyncedAt: '2026-11-25T01:00:00Z', pendingFeedback: '@bob commented' },
+    ],
+  });
+  const quiet = pr({ id: 'quiet', position: 0, ghNumber: 6200, ghAuthor: 'charlie', ghUpdatedAt: '2026-11-24T00:00:00Z' });
+  setBoard([quiet, multi]);
+
+  state.filters.search = '#6196';
+  assert.deepEqual(state.board.cards.filter(matchesFilters).map((c) => c.id), ['multi']);
+  state.filters.search = '';
+  state.filters.author = AUTHOR_MINE;
+  assert.deepEqual(state.board.cards.filter(matchesFilters).map((c) => c.id), ['multi']);
+  assert.deepEqual(sortColumnCards([quiet, multi], { sort: 'unread', pinned: new Set() }).map((c) => c.id), ['multi', 'quiet']);
+});

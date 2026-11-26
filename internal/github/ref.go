@@ -80,6 +80,80 @@ func ParseRef(input, defaultRepo string) (Ref, error) {
 	return ref, nil
 }
 
+// ParseRefs parses one or more GitHub references separated by whitespace,
+// commas, or semicolons (for example "#6081 #6196" or "owner/repo#1, #2").
+// Duplicate (repo, number) entries are removed while preserving order.
+func ParseRefs(input, defaultRepo string) ([]Ref, error) {
+	fields := strings.FieldsFunc(strings.TrimSpace(input), func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("%w: empty input", ErrBadRef)
+	}
+	out := make([]Ref, 0, len(fields))
+	seen := map[string]bool{}
+	for _, token := range fields {
+		ref, err := ParseRef(token, defaultRepo)
+		if err != nil {
+			return nil, err
+		}
+		key := fmt.Sprintf("%s#%d", strings.ToLower(ref.Repo), ref.Number)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
+// FindRefs extracts distinct PR or issue references mentioned in free text,
+// ordered by first appearance and capped to keep noisy prompts bounded.
+func FindRefs(text, defaultRepo string) []Ref {
+	const maxRefs = 5
+	type hit struct {
+		pos int
+		ref Ref
+	}
+	var hits []hit
+	add := func(pos int, raw string) {
+		if ref, err := ParseRef(raw, defaultRepo); err == nil {
+			hits = append(hits, hit{pos: pos, ref: ref})
+		}
+	}
+	for _, loc := range textURLRe.FindAllStringIndex(text, -1) {
+		add(loc[0], text[loc[0]:loc[1]])
+	}
+	for _, m := range textShortRe.FindAllStringSubmatchIndex(text, -1) {
+		add(m[0], text[m[2]:m[3]]+"#"+text[m[4]:m[5]])
+	}
+	for _, m := range textRefRe.FindAllStringSubmatchIndex(text, -1) {
+		add(m[2], text[m[2]:m[3]])
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	for i := 1; i < len(hits); i++ {
+		for j := i; j > 0 && hits[j].pos < hits[j-1].pos; j-- {
+			hits[j], hits[j-1] = hits[j-1], hits[j]
+		}
+	}
+	out := make([]Ref, 0, min(len(hits), maxRefs))
+	seen := map[string]bool{}
+	for _, h := range hits {
+		key := fmt.Sprintf("%s#%d", strings.ToLower(h.ref.Repo), h.ref.Number)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, h.ref)
+		if len(out) == maxRefs {
+			break
+		}
+	}
+	return out
+}
+
 // FindRef extracts the first PR or issue reference mentioned in free text,
 // such as an AO session display name ("[PR #6247][Review] ...").
 func FindRef(text, defaultRepo string) (Ref, bool) {

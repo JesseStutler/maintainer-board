@@ -486,6 +486,9 @@ func (c *Client) parseIssueView(data []byte) (*Item, error) {
 		LastOwnActivityAt:   lastOwnActivity(user, nil, nil, v.Comments, nil),
 		LastOtherActivityAt: lastOtherActivity(user, nil, v.Comments),
 	}
+	if !sameUser(item.Author, user) {
+		item.MyReview = myIssueComment(user, v.Comments)
+	}
 	if user != "" {
 		item.HasActorData = true
 		item.OtherActivities = otherActivities(user, nil, v.Comments, nil)

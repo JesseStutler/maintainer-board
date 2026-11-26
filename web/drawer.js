@@ -21,6 +21,13 @@ import {
   harnessLabel,
   activityInfo,
   isSessionActive,
+  cardLinks,
+  linkRefLabel,
+  linkUrl,
+  linkStateInfo,
+  linkIconName,
+  isLinkMine,
+  linkReviewInfo,
   ghRefLabel,
   ghUrl,
   ghStateInfo,
@@ -932,16 +939,24 @@ function stat(iconName, label, value, title) {
 function renderGitHub(card) {
   const { els } = ctx;
   const nodes = [];
+  const links = cardLinks(card);
 
-  if (!card.ghNumber) {
+  const linkForm = ({ compact = false } = {}) => {
     const input = h('input', {
-      class: 'input mono',
+      class: ['input mono', compact && 'input-sm'],
       type: 'text',
-      placeholder: '#6247, owner/repo#123 or a GitHub pull request or issue URL',
+      placeholder: compact
+        ? 'Add PR / Issue (#6196, owner/repo#123 or URL)'
+        : '#6247 #6196, owner/repo#123 or GitHub pull request / issue URLs',
       spellcheck: 'false',
-      'aria-label': 'GitHub reference',
+      'aria-label': compact ? 'Add another GitHub reference' : 'GitHub reference',
     });
-    const button = h('button', { class: 'btn', type: 'button' }, icon('link', 13), h('span', null, 'Link PR / Issue'));
+    const button = h(
+      'button',
+      { class: ['btn', compact && 'btn-sm'], type: 'button' },
+      icon(compact ? 'plus' : 'link', 13),
+      h('span', null, compact ? 'Add' : 'Link PR / Issue'),
+    );
     const submit = () => {
       const ref = input.value.trim();
       if (!ref) {
@@ -949,10 +964,15 @@ function renderGitHub(card) {
         return;
       }
       withBusy(button, async () => {
+        const beforeCount = cardLinks(cardById(ctx.cardId)).length;
         const updated = await api.post(cardPath(ctx.cardId, '/link-github'), { ref });
         input.value = '';
         applyCard(updated);
-        toast(`Linked ${ghRefLabel(updated)}.`, 'success');
+        const after = cardLinks(updated);
+        const added = after.length - beforeCount;
+        if (added > 1) toast(`Linked ${added} GitHub items.`, 'success');
+        else if (added === 1) toast(`Linked ${linkRefLabel(after[after.length - 1])}.`, 'success');
+        else toast(`Synced ${ghRefLabel(updated)}.`, 'success');
       }, null, 'Linking...');
     };
     button.addEventListener('click', submit);
@@ -962,12 +982,16 @@ function renderGitHub(card) {
         submit();
       }
     });
+    return h('div', { class: ['gh-link-form', compact && 'gh-link-add'] }, input, button);
+  };
+
+  if (links.length === 0) {
     const { head, collapsed } = sectionHead('github', 'GitHub Tracking', card, { peek: 'Not linked to a pull request or issue' });
     nodes.push(head);
     if (!collapsed) {
       nodes.push(
-        h('div', { class: 'gh-link-form' }, input, button),
-        h('p', { class: 'hint' }, 'Linking records the current state as the reviewed baseline. Later commits, comments, CI results and review decisions show up as updates.'),
+        linkForm(),
+        h('p', { class: 'hint' }, 'Link one or more PRs and issues (space- or comma-separated). Linking records the current state as the reviewed baseline.'),
       );
     }
     els.github.replaceChildren(...nodes);
@@ -979,8 +1003,8 @@ function renderGitHub(card) {
     {
       class: 'btn btn-sm btn-collapsible',
       type: 'button',
-      title: 'Sync Now: fetch the latest state from GitHub',
-      'aria-label': 'Sync Now',
+      title: links.length > 1 ? 'Sync All: fetch the latest state of every linked PR and issue from GitHub' : 'Sync Now: fetch the latest state from GitHub',
+      'aria-label': links.length > 1 ? 'Sync All' : 'Sync Now',
       onClick: (e) =>
         withBusy(e.currentTarget, async () => {
           const res = await api.post(cardPath(ctx.cardId, '/sync-github'));
@@ -995,39 +1019,50 @@ function renderGitHub(card) {
         }, 'Syncing...'),
     },
     icon('refresh', 14),
-    h('span', { class: 'btn-label' }, 'Sync Now'),
+    h('span', { class: 'btn-label' }, links.length > 1 ? 'Sync All' : 'Sync Now'),
   );
-  const unlinkButton = h(
-    'button',
-    {
-      class: 'btn btn-sm btn-collapsible',
-      type: 'button',
-      title: 'Unlink: stop tracking this pull request or issue on the card',
-      'aria-label': 'Unlink',
-      onClick: async (e) => {
-        const button = e.currentTarget;
-        const ok = await confirmDialog({
-          title: 'Unlink from GitHub',
-          message: `Stop tracking ${ghRefLabel(card)} on this card? The update history baseline is discarded.`,
-          confirmLabel: 'Unlink',
-        });
-        if (!ok) return;
-        withBusy(button, async () => {
-          applyCard(await api.post(cardPath(ctx.cardId, '/unlink-github')));
-        });
-      },
-    },
-    icon('unlink', 14),
-    h('span', { class: 'btn-label' }, 'Unlink'),
-  );
-  const mine = myReviewInfo(card);
-  const stateInfo = ghStateInfo(card);
-  const peekParts = [`${card.ghKind === 'issue' ? 'Issue' : 'PR'} ${ghRefLabel(card)}`, card.ghLastSyncedAt ? stateInfo.label : 'Not synced'];
+  const unlinkButton =
+    links.length === 1
+      ? h(
+          'button',
+          {
+            class: 'btn btn-sm btn-collapsible',
+            type: 'button',
+            title: 'Unlink: stop tracking this pull request or issue on the card',
+            'aria-label': 'Unlink',
+            onClick: async (e) => {
+              const button = e.currentTarget;
+              const ok = await confirmDialog({
+                title: 'Unlink from GitHub',
+                message: `Stop tracking ${linkRefLabel(links[0])} on this card? The update history baseline is discarded.`,
+                confirmLabel: 'Unlink',
+              });
+              if (!ok) return;
+              withBusy(button, async () => {
+                applyCard(await api.post(cardPath(ctx.cardId, '/unlink-github')));
+              });
+            },
+          },
+          icon('unlink', 14),
+          h('span', { class: 'btn-label' }, 'Unlink'),
+        )
+      : null;
+
+  const primary = links[0];
+  const mine = linkReviewInfo(primary);
+  const stateInfo = linkStateInfo(primary);
+  const moreSuffix = links.length > 1 ? ` +${links.length - 1}` : '';
+  const peekParts = [
+    `${primary.kind === 'issue' ? 'Issue' : 'PR'} ${linkRefLabel(primary)}${moreSuffix}`,
+    primary.lastSyncedAt ? stateInfo.label : 'Not synced',
+  ];
   if (card.hasUnreadUpdates) peekParts.push(`Updated: ${card.updateSummary || 'new activity'}`);
   else if (mine) peekParts.push(mine.label);
+  else if (card.ghPendingFeedback) peekParts.push(card.ghPendingFeedback);
   const { head, collapsed } = sectionHead('github', 'GitHub Tracking', card, {
+    badge: links.length > 1 ? h('span', { class: 'badge', title: `${links.length} linked GitHub items` }, String(links.length)) : null,
     peek: peekParts.join(' / '),
-    peekTone: card.hasUnreadUpdates || (mine && mine.kind === 'stale') ? 'is-warning' : '',
+    peekTone: card.hasUnreadUpdates || (mine && mine.kind === 'stale') || card.ghPendingFeedback ? 'is-warning' : '',
     actions: [syncButton, unlinkButton],
   });
   nodes.push(head);
@@ -1037,9 +1072,22 @@ function renderGitHub(card) {
   }
 
   const stack = h('div', { class: 'stack' });
+  links.forEach((link, idx) => {
+    stack.appendChild(renderGitHubLink(card, link, idx, links.length));
+  });
+  stack.appendChild(linkForm({ compact: true }));
+  nodes.push(stack);
+  els.github.replaceChildren(...nodes);
+}
 
-  if (card.hasUnreadUpdates) {
-    const isPR = card.ghKind === 'pr';
+function renderGitHubLink(card, link, idx, total) {
+  const wrap = h('div', { class: 'stack gh-link-item' });
+  const linkMine = linkReviewInfo(link);
+  const info = linkStateInfo(link);
+  const label = linkRefLabel(link);
+  const isPR = link.kind === 'pr';
+
+  if (link.hasUnreadUpdates) {
     const actions = !isPR
       ? h(
           'div',
@@ -1050,14 +1098,14 @@ function renderGitHub(card) {
               class: 'btn btn-sm btn-warning',
               type: 'button',
               title: 'Clear the update banner for this issue',
-              onClick: (e) => withBusy(e.currentTarget, () => acknowledge('')),
+              onClick: (e) => withBusy(e.currentTarget, () => acknowledge('', link.id)),
             },
             icon('check', 13),
             h('span', null, 'Mark Caught Up'),
           ),
         )
       : null;
-    stack.appendChild(
+    wrap.appendChild(
       h(
         'div',
         { class: 'alert alert-warning', role: 'status' },
@@ -1065,91 +1113,142 @@ function renderGitHub(card) {
         h(
           'div',
           { class: 'alert-body' },
-          h('div', { class: 'alert-title' }, 'Updated since your last review'),
-          h('div', { class: 'alert-detail' }, card.updateSummary || 'New activity'),
+          h('div', { class: 'alert-title' }, total > 1 ? `${label} updated since your last look` : 'Updated since your last review'),
+          h('div', { class: 'alert-detail' }, link.updateSummary || 'New activity'),
           actions,
         ),
       ),
     );
   }
 
-  if (card.ghError) {
-    stack.appendChild(
+  if (link.error) {
+    wrap.appendChild(
       h(
         'div',
         { class: 'alert alert-danger' },
         icon('x-circle', 15),
-        h('div', { class: 'alert-body' }, h('div', { class: 'alert-title' }, 'Last sync failed'), h('div', { class: 'alert-detail' }, card.ghError)),
+        h('div', { class: 'alert-body' }, h('div', { class: 'alert-title' }, total > 1 ? `${label} sync failed` : 'Last sync failed'), h('div', { class: 'alert-detail' }, link.error)),
       ),
     );
   }
 
-  const refLink = h('a', { class: 'mono', href: ghUrl(card), target: '_blank', rel: 'noopener noreferrer' }, `${card.ghRepo}#${card.ghNumber}`);
-  if (!card.ghLastSyncedAt) {
-    stack.appendChild(
-      h('div', { class: 'panel' }, h('div', { class: 'gh-strip' }, pill('pill-muted', 'Not synced'), refLink, h('span', { class: 'hint' }, 'Waiting for the first sync with GitHub.'))),
+  const linkActions =
+    total > 1
+      ? h(
+          'span',
+          { class: 'gh-link-actions' },
+          idx === 0
+            ? h('span', { class: 'badge badge-primary-link', title: 'Shown on the card face' }, 'Primary')
+            : h(
+                'button',
+                {
+                  class: 'btn btn-ghost btn-sm',
+                  type: 'button',
+                  title: 'Show this item on the card face as the primary link',
+                  onClick: (e) =>
+                    withBusy(e.currentTarget, async () => {
+                      const updated = await api.post(cardPath(ctx.cardId, '/primary-github'), { linkId: link.id, repo: link.repo, number: link.number });
+                      applyCard(updated);
+                      toast(`${label} is now the primary link.`, 'success');
+                    }),
+                },
+                'Set Primary',
+              ),
+          h(
+            'button',
+            {
+              class: 'btn btn-ghost btn-icon btn-sm',
+              type: 'button',
+              title: `Remove ${label} from this card`,
+              'aria-label': `Remove ${label}`,
+              onClick: async (e) => {
+                const button = e.currentTarget;
+                const ok = await confirmDialog({
+                  title: 'Remove linked item',
+                  message: `Stop tracking ${label} on this card?`,
+                  confirmLabel: 'Remove',
+                });
+                if (!ok) return;
+                withBusy(button, async () => {
+                  const updated = await api.post(cardPath(ctx.cardId, '/unlink-github'), { linkId: link.id, repo: link.repo, number: link.number });
+                  applyCard(updated);
+                  toast(`Removed ${label}.`, 'success');
+                });
+              },
+            },
+            icon('x', 13),
+          ),
+        )
+      : null;
+
+  const refLink = h('a', { class: 'mono', href: linkUrl(link), target: '_blank', rel: 'noopener noreferrer' }, `${link.repo}#${link.number}`);
+  if (!link.lastSyncedAt) {
+    wrap.appendChild(
+      h(
+        'div',
+        { class: 'panel' },
+        h('div', { class: 'gh-strip' }, pill('pill-muted', 'Not synced'), refLink, h('span', { class: 'hint' }, 'Waiting for the first sync with GitHub.'), linkActions),
+      ),
     );
-    nodes.push(stack);
-    els.github.replaceChildren(...nodes);
-    return;
+    return wrap;
   }
 
   const strip = h(
     'div',
     { class: 'gh-strip' },
-    h('span', { class: 'badge' }, card.ghKind === 'issue' ? 'Issue' : 'PR'),
+    h('span', { class: 'badge' }, link.kind === 'issue' ? 'Issue' : 'PR'),
     refLink,
-    pill(stateInfo.cls, stateInfo.label, ghIconName(card)),
+    pill(info.cls, info.label, linkIconName(link)),
   );
-  if (card.ghKind === 'pr') {
-    const ci = ciInfo(card.ghCiStatus);
+  if (isPR) {
+    const ci = ciInfo(link.ciStatus);
     if (ci) strip.appendChild(pill(ci.cls, ci.label, ci.icon, ci.title));
-    const review = reviewInfo(card.ghReviewDecision, isMine(card));
+    const review = reviewInfo(link.reviewDecision, isLinkMine(link));
     if (review) strip.appendChild(pill(review.cls, review.label, review.icon, review.title));
   }
-  strip.appendChild(h('p', { class: 'gh-title' }, card.ghTitle));
-  if (card.ghLabels && card.ghLabels.length) {
-    strip.appendChild(h('div', { class: 'tag-row', style: { margin: '0' } }, card.ghLabels.map((l) => h('span', { class: 'tag' }, h('span', null, l)))));
+  if (linkActions) strip.appendChild(linkActions);
+  strip.appendChild(h('p', { class: 'gh-title' }, link.title));
+  if (link.labels && link.labels.length) {
+    strip.appendChild(h('div', { class: 'tag-row', style: { margin: '0' } }, link.labels.map((l) => h('span', { class: 'tag' }, h('span', null, l)))));
   }
 
   const stats = h('div', { class: 'gh-stats' });
-  if (card.ghAuthor) {
+  if (link.author) {
     stats.appendChild(
-      h('span', { class: 'meta-item', title: 'Author' }, icon('user', 13), h('span', { class: 'mono' }, `@${card.ghAuthor}`), isMine(card) ? h('span', { class: 'badge badge-mine' }, 'MINE') : null),
+      h('span', { class: 'meta-item', title: 'Author' }, icon('user', 13), h('span', { class: 'mono' }, `@${link.author}`), isLinkMine(link) ? h('span', { class: 'badge badge-mine' }, 'MINE') : null),
     );
   }
-  if (card.ghKind === 'pr') {
-    stats.appendChild(stat('commit', card.ghCommitCount === 1 ? 'commit' : 'commits', card.ghCommitCount, `Head ${card.ghHeadSha.slice(0, 9)}`));
+  if (isPR) {
+    stats.appendChild(stat('commit', link.commitCount === 1 ? 'commit' : 'commits', link.commitCount, `Head ${(link.headSha || '').slice(0, 9)}`));
   }
-  stats.appendChild(stat('message', card.ghCommentCount === 1 ? 'comment' : 'comments', card.ghCommentCount, 'Conversation comments'));
-  if (card.ghKind === 'pr') {
-    stats.appendChild(stat('pr', card.ghReviewCommentCount === 1 ? 'review comment' : 'review comments', card.ghReviewCommentCount, 'Inline review comments plus review summaries'));
+  stats.appendChild(stat('message', link.commentCount === 1 ? 'comment' : 'comments', link.commentCount, 'Conversation comments'));
+  if (isPR) {
+    stats.appendChild(stat('pr', link.reviewCommentCount === 1 ? 'review comment' : 'review comments', link.reviewCommentCount, 'Inline review comments plus review summaries'));
   }
-  stats.appendChild(h('span', { class: 'meta-item', title: `Updated on GitHub ${fmtDateTime(card.ghUpdatedAt)}` }, icon('clock', 12), `updated ${relTime(card.ghUpdatedAt)}`));
+  stats.appendChild(h('span', { class: 'meta-item', title: `Updated on GitHub ${fmtDateTime(link.updatedAt)}` }, icon('clock', 12), `updated ${relTime(link.updatedAt)}`));
   stats.appendChild(h('span', { class: 'spacer' }));
-  stats.appendChild(h('span', { class: 'hint', title: `Baseline acknowledged ${fmtDateTime(card.ackAt)}` }, `synced ${relTime(card.ghLastSyncedAt)}`));
+  stats.appendChild(h('span', { class: 'hint', title: `Baseline acknowledged ${fmtDateTime(link.ackAt)}` }, `synced ${relTime(link.lastSyncedAt)}`));
 
-  stack.appendChild(h('div', { class: 'panel' }, strip, stats, reviewRow(card, mine)));
-  nodes.push(stack);
-  els.github.replaceChildren(...nodes);
+  wrap.appendChild(h('div', { class: 'panel' }, strip, stats, reviewRow(card, link, linkMine)));
+  return wrap;
 }
 
 /**
- * "Your review" line of the GitHub panel: where the maintainer personally
+ * "Your review" line of a GitHub link panel: where the maintainer personally
  * stands, when they last looked, and the buttons to record or clear a
  * review that was done outside GitHub.
  */
-function reviewRow(card, mine) {
-  const row = h('div', { class: 'gh-review' }, h('span', { class: 'gh-review-label' }, 'Your review'));
-  const kind = card.ghKind === 'issue' ? 'issue' : 'pull request';
-  if (isMine(card)) {
+function reviewRow(card, link, mine) {
+  const row = h('div', { class: 'gh-review' }, h('span', { class: 'gh-review-label' }, link.kind === 'issue' ? 'Your status' : 'Your review'));
+  const kind = link.kind === 'issue' ? 'issue' : 'pull request';
+  const open = link.state !== 'MERGED' && link.state !== 'CLOSED';
+  if (isLinkMine(link)) {
     row.appendChild(h('span', { class: 'hint' }, `You opened this ${kind}.`));
-    const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
-    if (open && card.ghPendingFeedback) {
+    if (open && link.pendingFeedback) {
       row.appendChild(
         pill(
           'pill-warning',
-          card.ghPendingFeedback,
+          link.pendingFeedback,
           'message',
           'Commented after your last commit or reply on GitHub. Clears automatically when you push or reply.',
         ),
@@ -1157,19 +1256,18 @@ function reviewRow(card, mine) {
     }
     return row;
   }
-  const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
   if (mine) {
     const node = pill(mine.cls, mine.label, mine.icon, mine.title);
     node.dataset.review = mine.kind;
     row.appendChild(node);
   } else {
-    row.appendChild(h('span', { class: 'hint' }, currentUser() ? 'No review recorded.' : 'Your GitHub login is unknown, so reviews on GitHub are not detected.'));
+    row.appendChild(h('span', { class: 'hint' }, currentUser() ? (link.kind === 'issue' ? 'No reply recorded.' : 'No review recorded.') : 'Your GitHub login is unknown, so GitHub activity is not attributed to you.'));
   }
-  if (card.ghMyReviewState && card.ghMyReviewedAt) {
-    row.appendChild(h('span', { class: 'hint', title: new Date(card.ghMyReviewedAt).toLocaleString() }, `last look ${relTime(card.ghMyReviewedAt)}`));
+  if (link.myReviewState && link.myReviewedAt) {
+    row.appendChild(h('span', { class: 'hint', title: new Date(link.myReviewedAt).toLocaleString() }, `last look ${relTime(link.myReviewedAt)}`));
   }
   row.appendChild(h('span', { class: 'spacer' }));
-  if (card.ghMyReviewState === 'REVIEWED') {
+  if (link.myReviewState === 'REVIEWED') {
     row.appendChild(
       h(
         'button',
@@ -1179,7 +1277,8 @@ function reviewRow(card, mine) {
           title: 'Remove the review mark you set on the board',
           onClick: (e) =>
             withBusy(e.currentTarget, async () => {
-              applyCard(await api.post(cardPath(ctx.cardId, '/unreview')));
+              const body = link.id ? { linkId: link.id } : {};
+              applyCard(await api.post(cardPath(ctx.cardId, '/unreview'), body));
               toast('Review mark cleared.', 'success');
             }),
         },
@@ -1189,7 +1288,7 @@ function reviewRow(card, mine) {
   }
   // Issues have no GitHub review API, so allow marking them reviewed locally.
   // Pull requests reflect actual GitHub reviews only (display-only here).
-  if (card.ghKind !== 'pr' && open && !card.hasUnreadUpdates && (!mine || mine.kind !== 'current')) {
+  if (link.kind !== 'pr' && open && !link.hasUnreadUpdates && (!mine || mine.kind !== 'current')) {
     row.appendChild(
       h(
         'button',
@@ -1197,7 +1296,7 @@ function reviewRow(card, mine) {
           class: 'btn btn-sm',
           type: 'button',
           title: `Record that you reviewed the current state of this ${kind}`,
-          onClick: (e) => withBusy(e.currentTarget, () => acknowledge('')),
+          onClick: (e) => withBusy(e.currentTarget, () => acknowledge('', link.id)),
         },
         icon('check', 14),
         h('span', null, 'Mark Reviewed'),
@@ -1207,8 +1306,10 @@ function reviewRow(card, mine) {
   return row;
 }
 
-async function acknowledge(moveToColumnId) {
-  const body = moveToColumnId ? { moveToColumnId } : {};
+async function acknowledge(moveToColumnId, linkId = '') {
+  const body = {};
+  if (moveToColumnId) body.moveToColumnId = moveToColumnId;
+  if (linkId) body.linkId = linkId;
   const before = cardById(ctx.cardId);
   const hadUpdates = Boolean(before && before.hasUnreadUpdates);
   applyCard(await api.post(cardPath(ctx.cardId, '/ack'), body));
@@ -2221,7 +2322,8 @@ export function updateDrawer() {
         card.ghRepo, card.ghNumber, card.ghKind, card.ghState, card.ghCiStatus, card.ghReviewDecision, card.ghTitle, card.ghAuthor,
         card.ghHeadSha, card.ghCommitCount, card.ghCommentCount, card.ghReviewCommentCount, card.ghLabels, card.ghUpdatedAt,
         card.ghLastSyncedAt, card.ghError, card.hasUnreadUpdates, card.updateCycles, card.updateSummary, card.ackAt,
-        card.ghMyReviewState, card.ghMyReviewedAt, card.ghIsStaleReview, currentUser(), sectionCollapsed('github', card),
+        card.ghMyReviewState, card.ghMyReviewedAt, card.ghIsStaleReview, card.ghPendingFeedback, card.ghLinks,
+        currentUser(), sectionCollapsed('github', card),
         (columnByRole('waiting') || {}).title, Math.floor(Date.now() / 60000),
       ],
       () => renderGitHub(card),

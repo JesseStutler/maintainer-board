@@ -883,3 +883,75 @@ func TestLastOwnActivityAndPendingFeedback(t *testing.T) {
 		t.Fatalf("first sync move = %q, want %q", res.MoveToRole, RoleUpdates)
 	}
 }
+
+func TestIssueReviewTriageAndReplyAutoMove(t *testing.T) {
+	openIssue := Snapshot{State: StateOpen, Comments: 3}
+
+	// 1. First sync on someone else's issue where you replied and nobody answered yet -> Waiting.
+	res := Evaluate(Input{
+		Live:          openIssue,
+		FirstSync:     true,
+		AutoMove:      true,
+		ColumnRole:    RoleInbox,
+		Kind:          KindIssue,
+		MyReviewState: MyReviewCommented,
+		MyReviewStale: false,
+	})
+	if res.MoveToRole != RoleWaiting {
+		t.Fatalf("fresh issue reply triage = %q, want %q", res.MoveToRole, RoleWaiting)
+	}
+
+	// 2. First sync on someone else's issue where someone replied after you -> Updates.
+	res = Evaluate(Input{
+		Live:          openIssue,
+		FirstSync:     true,
+		AutoMove:      true,
+		ColumnRole:    RoleInbox,
+		Kind:          KindIssue,
+		MyReviewState: MyReviewCommented,
+		MyReviewStale: true,
+	})
+	if res.MoveToRole != RoleUpdates {
+		t.Fatalf("stale issue reply triage = %q, want %q", res.MoveToRole, RoleUpdates)
+	}
+
+	// 3. New reply from another user on an issue names who commented and moves to Updates.
+	track := Ack(openIssue)
+	afterReply := openIssue
+	afterReply.Comments = 4
+	res = Evaluate(Input{
+		Live:                  afterReply,
+		Track:                 track,
+		AutoMove:              true,
+		ColumnRole:            RoleWaiting,
+		Kind:                  KindIssue,
+		HasActorData:          true,
+		AuthorReplies:         1,
+		OtherReplyAuthors:     []string{"reporter"},
+		LatestOtherActivityAt: "2026-11-21T10:00:00Z",
+		PrevOtherActivityAt:   "2026-11-20T10:00:00Z",
+	})
+	if res.MoveToRole != RoleUpdates || res.Track.Summary != "@reporter commented" {
+		t.Fatalf("issue reply delta = %+v", res)
+	}
+
+	// 4. Posting your own reply clears unread state and moves the issue to Waiting.
+	afterMyReply := afterReply
+	afterMyReply.Comments = 5
+	res = Evaluate(Input{
+		Live:              afterMyReply,
+		Track:             res.Track,
+		AutoMove:          true,
+		ColumnRole:        RoleUpdates,
+		Kind:              KindIssue,
+		HasActorData:      true,
+		MyReviewSubmitted: true,
+		MyReviewState:     MyReviewCommented,
+	})
+	if res.MoveToRole != RoleWaiting || res.Track.HasUnread {
+		t.Fatalf("issue my reply = %+v", res)
+	}
+	if len(res.Events) != 1 || res.Events[0] != "Your reply posted; baseline updated" {
+		t.Fatalf("issue my reply events = %v", res.Events)
+	}
+}

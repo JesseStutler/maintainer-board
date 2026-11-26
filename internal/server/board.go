@@ -559,32 +559,40 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	warnings := []string{}
-	var ref *github.Ref
-	var item *github.Item
+	var refs []github.Ref
+	var items []*github.Item
 	if req.GitHubRef != "" {
-		parsed, err := github.ParseRef(req.GitHubRef, s.defaultRepo(ctx))
+		parsed, err := github.ParseRefs(req.GitHubRef, s.defaultRepo(ctx))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_GITHUB_REF", "Unrecognized GitHub reference. Use #123, owner/repo#123 or a pull request or issue URL.")
 			return
 		}
-		ref = &parsed
-		fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		item, err = s.gh.Fetch(fetchCtx, ref.Repo, ref.Number, "")
-		cancel()
-		switch {
-		case errors.Is(err, github.ErrNotFound):
-			writeError(w, http.StatusNotFound, "GITHUB_NOT_FOUND", fmt.Sprintf("%s was not found on GitHub.", ref))
-			return
-		case err != nil:
-			if req.Title == "" {
-				s.writeGitHubError(w, err)
+		refs = parsed
+		for _, ref := range refs {
+			fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			item, err := s.gh.Fetch(fetchCtx, ref.Repo, ref.Number, "")
+			cancel()
+			switch {
+			case errors.Is(err, github.ErrNotFound):
+				writeError(w, http.StatusNotFound, "GITHUB_NOT_FOUND", fmt.Sprintf("%s was not found on GitHub.", ref))
 				return
+			case err != nil:
+				if req.Title == "" && len(items) == 0 {
+					s.writeGitHubError(w, err)
+					return
+				}
+				warnings = append(warnings, fmt.Sprintf("GitHub could not be reached; %s will be synced on the next cycle.", ref))
+			default:
+				items = append(items, item)
 			}
-			warnings = append(warnings, fmt.Sprintf("GitHub could not be reached; %s will be synced on the next cycle.", ref))
 		}
 	}
-	if req.Title == "" && item != nil {
-		req.Title = item.Title
+	var primaryItem *github.Item
+	if len(items) > 0 {
+		primaryItem = items[0]
+	}
+	if req.Title == "" && primaryItem != nil {
+		req.Title = primaryItem.Title
 	}
 	if req.Title == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "A title is required.")
@@ -617,13 +625,13 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	category := req.Category
 	if category == "" {
 		switch {
-		case item != nil && item.Kind == github.KindPR:
-			if isOwn(item.Author, s.currentUser()) {
+		case primaryItem != nil && primaryItem.Kind == github.KindPR:
+			if isOwn(primaryItem.Author, s.currentUser()) {
 				category = db.CategoryDev
 			} else {
 				category = db.CategoryPRReview
 			}
-		case item != nil && item.Kind == github.KindIssue:
+		case primaryItem != nil && primaryItem.Kind == github.KindIssue:
 			category = db.CategoryIssue
 		default:
 			category = InferCategory(req.Title)
@@ -647,8 +655,11 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	if req.AOSessionID != "" {
 		events = append(events, db.EventInput{Kind: db.EventSession, Message: "Linked AO session " + req.AOSessionID})
 	}
-	if ref != nil {
-		card.GHRepo, card.GHNumber = ref.Repo, ref.Number
+	if len(refs) > 0 {
+		for _, ref := range refs {
+			card.GHLinks = append(card.GHLinks, db.CardLink{Repo: ref.Repo, Number: ref.Number})
+		}
+		recomputeCardGitHub(card, s.defaultRepo(ctx))
 	}
 	card, err = s.store.CreateCard(ctx, card, events...)
 	if err != nil {
@@ -658,7 +669,7 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	if req.AOSessionID != "" {
 		_ = s.store.UnignoreSession(ctx, req.AOSessionID)
 	}
-	if item != nil {
+	for _, item := range items {
 		if updated, _, err := s.applyGitHubItem(ctx, card.ID, item); err != nil {
 			warnings = append(warnings, "GitHub link could not be saved: "+err.Error())
 		} else {

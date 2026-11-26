@@ -157,21 +157,70 @@ export function isSessionActive(card) {
   return Boolean(s && !s.isTerminated && !s.needsResume && s.activity && s.activity.state === 'active');
 }
 
+/** All linked GitHub items on a card, primary link first. */
+export function cardLinks(card) {
+  if (!card) return [];
+  if (Array.isArray(card.ghLinks) && card.ghLinks.length > 0) return card.ghLinks;
+  if (!card.ghNumber) return [];
+  return [
+    {
+      id: '',
+      repo: card.ghRepo || '',
+      number: card.ghNumber,
+      kind: card.ghKind || 'pr',
+      url: card.ghUrl || '',
+      title: card.ghTitle || '',
+      author: card.ghAuthor || '',
+      state: card.ghState || '',
+      ciStatus: card.ghCiStatus || '',
+      reviewDecision: card.ghReviewDecision || '',
+      headSha: card.ghHeadSha || '',
+      commitCount: card.ghCommitCount || 0,
+      commentCount: card.ghCommentCount || 0,
+      reviewCommentCount: card.ghReviewCommentCount || 0,
+      labels: card.ghLabels || [],
+      updatedAt: card.ghUpdatedAt || '',
+      lastSyncedAt: card.ghLastSyncedAt || '',
+      error: card.ghError || '',
+      myReviewState: card.ghMyReviewState || '',
+      myReviewedAt: card.ghMyReviewedAt || '',
+      isStaleReview: Boolean(card.ghIsStaleReview),
+      pendingFeedback: card.ghPendingFeedback || '',
+      hasUnreadUpdates: Boolean(card.hasUnreadUpdates),
+      unreadUpdates: card.unreadUpdates || 0,
+      updateCycles: card.updateCycles || 0,
+      updateSummary: card.updateSummary || '',
+      ackAt: card.ackAt || '',
+    },
+  ];
+}
+
 /** "#6247" for the default repository, "owner/repo#12" otherwise. */
-export function ghRefLabel(card) {
-  if (!card.ghNumber) return '';
+export function linkRefLabel(link) {
+  if (!link || !link.number) return '';
   const defaultRepo = state.board ? state.board.settings.defaultRepo : '';
-  return card.ghRepo && card.ghRepo !== defaultRepo ? `${card.ghRepo}#${card.ghNumber}` : `#${card.ghNumber}`;
+  return link.repo && link.repo !== defaultRepo ? `${link.repo}#${link.number}` : `#${link.number}`;
+}
+
+export function ghRefLabel(card) {
+  const first = cardLinks(card)[0];
+  return first ? linkRefLabel(first) : '';
+}
+
+export function linkUrl(link) {
+  if (!link) return '';
+  if (link.url) return link.url;
+  if (!link.number || !link.repo) return '';
+  return `https://github.com/${link.repo}/issues/${link.number}`;
 }
 
 export function ghUrl(card) {
-  if (card.ghUrl) return card.ghUrl;
-  if (!card.ghNumber || !card.ghRepo) return '';
-  return `https://github.com/${card.ghRepo}/issues/${card.ghNumber}`;
+  const first = cardLinks(card)[0];
+  return first ? linkUrl(first) : '';
 }
 
-export function ghStateInfo(card) {
-  switch (card.ghState) {
+export function linkStateInfo(link) {
+  switch (link && link.state) {
     case 'OPEN':
       return { label: 'Open', cls: 'pill-success', tone: 'is-success' };
     case 'DRAFT':
@@ -185,9 +234,17 @@ export function ghStateInfo(card) {
   }
 }
 
+export function ghStateInfo(card) {
+  return linkStateInfo(cardLinks(card)[0] || { state: card.ghState });
+}
+
+export function linkIconName(link) {
+  if (link && link.state === 'MERGED') return 'merge';
+  return link && link.kind === 'issue' ? 'issue' : 'pr';
+}
+
 export function ghIconName(card) {
-  if (card.ghState === 'MERGED') return 'merge';
-  return card.ghKind === 'issue' ? 'issue' : 'pr';
+  return linkIconName(cardLinks(card)[0] || { state: card.ghState, kind: card.ghKind });
 }
 
 export function ciInfo(status) {
@@ -225,8 +282,16 @@ export function currentUser() {
   return (state.board && state.board.currentUser) || '';
 }
 
-/** True when the linked pull request or issue was written by the maintainer. */
+/** True when the given GitHub link was opened by the maintainer. */
+export function isLinkMine(link) {
+  const me = currentUser();
+  return Boolean(me && link && link.author && link.author.toLowerCase() === me.toLowerCase());
+}
+
+/** True when the primary linked pull request or issue was written by the maintainer. */
 export function isMine(card) {
+  const first = cardLinks(card)[0];
+  if (first) return isLinkMine(first);
   const me = currentUser();
   return Boolean(me && card.ghAuthor && card.ghAuthor.toLowerCase() === me.toLowerCase());
 }
@@ -248,35 +313,47 @@ const MY_REVIEW_DETAIL = {
 };
 
 /**
- * Where the maintainer personally stands on the linked item, which is not
- * the same as the overall review decision. `kind` is "current" (reviewed and
- * nothing changed since), "stale" (changed after the review), "none" (an
- * open pull request of somebody else that was not reviewed yet), or the
- * function returns null when there is nothing to say.
+ * Where the maintainer personally stands on a single linked item.
+ * `kind` is "current" (reviewed/replied and nothing changed since), "stale"
+ * (changed after the review/reply), "none" (an open PR of somebody else not
+ * yet reviewed), or null when there is nothing to show.
  */
-export function myReviewInfo(card) {
-  if (!card.ghNumber || !card.ghLastSyncedAt || isMine(card)) return null;
-  const state = card.ghMyReviewState;
-  const finished = card.ghState === 'MERGED' || card.ghState === 'CLOSED';
-  if (state) {
-    const name = MY_REVIEW_LABELS[state] || state;
-    const detail = MY_REVIEW_DETAIL[state] || 'You reviewed this';
-    if (card.ghIsStaleReview && !finished) {
+export function linkReviewInfo(link) {
+  if (!link || !link.number || !link.lastSyncedAt || isLinkMine(link)) return null;
+  const reviewState = link.myReviewState;
+  const finished = link.state === 'MERGED' || link.state === 'CLOSED';
+  const isIssue = link.kind === 'issue';
+  if (reviewState) {
+    const name = isIssue && reviewState === 'COMMENTED' ? 'Replied' : (MY_REVIEW_LABELS[reviewState] || reviewState);
+    const detail =
+      isIssue && reviewState === 'COMMENTED'
+        ? 'You commented on this issue on GitHub'
+        : (MY_REVIEW_DETAIL[reviewState] || 'You reviewed this');
+    if (link.isStaleReview && !finished) {
+      const label = isIssue ? (link.pendingFeedback || 'New replies') : 'Re-review needed';
+      const title = isIssue
+        ? `${detail}, and new replies arrived afterwards.`
+        : `${detail}, and it was updated afterwards: new commits or new replies. Your last look: ${name}.`;
       return {
         kind: 'stale',
-        label: 'Re-review needed',
+        label,
         cls: 'pill-warning',
         tone: 'is-warning',
-        icon: 'refresh',
-        title: `${detail}, and it was updated afterwards: new commits or new replies. Your last look: ${name}.`,
+        icon: isIssue ? 'message' : 'refresh',
+        title,
       };
     }
     return { kind: 'current', label: `You: ${name}`, cls: 'pill-you', tone: 'is-you', icon: 'check', title: `${detail}. Nothing changed since.` };
   }
-  if (card.ghKind === 'pr' && card.ghState === 'OPEN' && currentUser()) {
+  if (link.kind === 'pr' && link.state === 'OPEN' && currentUser()) {
     return { kind: 'none', label: 'Not reviewed', cls: 'pill-muted', tone: '', icon: 'eye', title: 'You have not reviewed this pull request yet' };
   }
   return null;
+}
+
+/** Where the maintainer personally stands on the card's primary linked item. */
+export function myReviewInfo(card) {
+  return linkReviewInfo(cardLinks(card)[0]);
 }
 
 /**
@@ -298,18 +375,23 @@ export function showCardReviewDecision(card, mine) {
 export function cardAuthors() {
   const seen = new Map();
   for (const card of cards()) {
-    if (!card.ghAuthor || hiddenOrchestrator(card)) continue;
-    const key = card.ghAuthor.toLowerCase();
-    if (!seen.has(key)) seen.set(key, card.ghAuthor);
+    if (hiddenOrchestrator(card)) continue;
+    for (const link of cardLinks(card)) {
+      if (!link.author) continue;
+      const key = link.author.toLowerCase();
+      if (!seen.has(key)) seen.set(key, link.author);
+    }
   }
   return Array.from(seen.values()).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 }
 
 function matchesAuthor(card, author) {
   if (!author) return true;
+  const links = cardLinks(card);
   // Without a known login "Mine" cannot be decided, so it does not filter.
-  if (author === AUTHOR_MINE) return !currentUser() || isMine(card);
-  return Boolean(card.ghAuthor) && card.ghAuthor.toLowerCase() === author.toLowerCase();
+  if (author === AUTHOR_MINE) return !currentUser() || links.some(isLinkMine);
+  const want = author.toLowerCase();
+  return links.some((link) => Boolean(link.author) && link.author.toLowerCase() === want);
 }
 
 /** Cards auto-created for orchestrator sessions are hidden unless enabled. */
@@ -334,20 +416,23 @@ export function searchKey() {
  * branch name, and a search for it should be reported as a match on the ID.
  */
 function cardHaystack(card) {
-  return [
+  const parts = [
     card.title,
     card.summary,
     card.notes,
-    card.ghTitle,
-    card.ghAuthor ? `${card.ghAuthor} @${card.ghAuthor}` : '',
-    card.ghRepo,
-    card.ghNumber ? `#${card.ghNumber} ${card.ghNumber}` : '',
     categoryLabel(card.category),
     (card.tags || []).join(' '),
-    (card.ghLabels || []).join(' '),
-  ]
-    .join('\n')
-    .toLowerCase();
+  ];
+  for (const link of cardLinks(card)) {
+    parts.push(
+      link.title,
+      link.author ? `${link.author} @${link.author}` : '',
+      link.repo,
+      link.number ? `#${link.number} ${link.number}` : '',
+      (link.labels || []).join(' '),
+    );
+  }
+  return parts.join('\n').toLowerCase();
 }
 
 function sessionHaystack(card) {
@@ -505,8 +590,13 @@ function activityTimestamp(card) {
 }
 
 function needsAttention(card) {
+  if (card.hasUnreadUpdates) return true;
+  for (const link of cardLinks(card)) {
+    const open = link.state !== 'MERGED' && link.state !== 'CLOSED';
+    if (link.hasUnreadUpdates || (open && (link.isStaleReview || link.pendingFeedback))) return true;
+  }
   const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
-  return Boolean(card.hasUnreadUpdates || (open && (card.ghIsStaleReview || card.ghPendingFeedback)));
+  return Boolean(open && (card.ghIsStaleReview || card.ghPendingFeedback));
 }
 
 /**

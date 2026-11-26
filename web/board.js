@@ -23,6 +23,8 @@ import {
   categoryLabel,
   harnessLabel,
   activityInfo,
+  cardLinks,
+  linkRefLabel,
   ghRefLabel,
   ghStateInfo,
   ciInfo,
@@ -175,6 +177,7 @@ function cardTop(card) {
   if (pinned) {
     top.appendChild(h('span', { class: 'card-pin', title: 'Pinned to top of column' }, icon('pin', 11)));
   }
+  const links = cardLinks(card);
   if (card.ghNumber) {
     const info = ghStateInfo(card);
     const kind = card.ghKind === 'issue' ? 'Issue ' : card.ghKind === 'pr' ? 'PR ' : '';
@@ -187,6 +190,17 @@ function cardTop(card) {
         card.ghState ? h('span', { class: 'gh-state' }, card.ghState) : null,
       ),
     );
+    if (links.length > 1) {
+      const extra = links.slice(1);
+      const extraAlert = extra.some((l) => {
+        const open = l.state !== 'MERGED' && l.state !== 'CLOSED';
+        return Boolean(l.hasUnreadUpdates || (open && (l.isStaleReview || l.pendingFeedback)));
+      });
+      const tip = links
+        .map((l) => `${l.kind === 'issue' ? 'Issue' : 'PR'} ${linkRefLabel(l)}${l.state ? ` (${l.state})` : ''}${l.title ? `: ${l.title}` : ''}`)
+        .join('\n');
+      top.appendChild(h('span', { class: ['gh-more-pill', extraAlert && 'has-updates'], title: tip }, `+${extra.length}`));
+    }
   }
   if (card.ghAuthor) {
     const mine = isMine(card);
@@ -225,7 +239,7 @@ function cardStatus(card) {
     node.dataset.review = mine.kind;
     strip.appendChild(node);
   }
-  if (isMine(card) && open && card.ghPendingFeedback && !card.hasUnreadUpdates) {
+  if (card.ghPendingFeedback && !card.hasUnreadUpdates && !(mine && mine.kind === 'stale' && mine.label === card.ghPendingFeedback)) {
     const node = chip(
       'warning',
       card.ghPendingFeedback,

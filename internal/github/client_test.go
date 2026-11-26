@@ -376,8 +376,18 @@ func TestFetchReportsMyReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.MyReview != (MyReview{}) || got.LastOtherActivityAt != "2026-11-03T00:00:00Z" {
+	wantIssueReview := MyReview{State: MyReviewCommented, At: "2026-11-02T00:00:00Z"}
+	if got.MyReview != wantIssueReview || got.LastOtherActivityAt != "2026-11-03T00:00:00Z" {
 		t.Errorf("issue: MyReview = %+v, LastOtherActivityAt = %q", got.MyReview, got.LastOtherActivityAt)
+	}
+	// The issue author's own comments do not count as an external review.
+	c.SetUser("reporter")
+	gotOwn, err := c.Fetch(context.Background(), "a/b", 7, KindIssue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOwn.MyReview != (MyReview{}) {
+		t.Errorf("own issue: MyReview = %+v, want empty", gotOwn.MyReview)
 	}
 }
 

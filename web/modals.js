@@ -31,7 +31,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
   }
 
   const title = h('input', { class: 'input', type: 'text', maxlength: '300', placeholder: 'What needs to be done', 'data-autofocus': true });
-  const ghRef = h('input', { class: 'input mono', type: 'text', spellcheck: 'false', placeholder: '#6247, owner/repo#123 or URL' });
+  const ghRef = h('input', { class: 'input mono', type: 'text', spellcheck: 'false', placeholder: '#6247 #6196, owner/repo#123 or URLs' });
   const category = select([['', 'Auto-detect'], ...CATEGORIES], '');
   const column = select(columns().map((c) => [c.id, c.title]), columnId || intake.id);
   const tags = h('input', { class: 'input', type: 'text', placeholder: 'scheduler, sig-scheduling' });
@@ -109,7 +109,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
     'div',
     { class: 'form-grid' },
     field('Title', title, { full: true, hint: 'Leave empty to use the title of the linked pull request or issue.' }),
-    field('GitHub pull request or issue', ghRef, { hint: `Bare numbers resolve to ${board.settings.defaultRepo}.` }),
+    field('GitHub pull request or issue', ghRef, { hint: `Bare numbers resolve to ${board.settings.defaultRepo}. Separate multiple refs with spaces or commas.` }),
     field('Tags', tags, { hint: 'Comma-separated.' }),
     field('Category', category),
     field('Column', column),

@@ -211,6 +211,61 @@ CREATE TABLE IF NOT EXISTS content_index_state (
 	"",
 	// 5: unaddressed reviewer feedback summary on the user's own items; see migrationSteps.
 	"",
+	// 6: multiple GitHub PR/issue links per card, each with independent tracking.
+	`
+CREATE TABLE IF NOT EXISTS card_links (
+	id                       TEXT PRIMARY KEY,
+	card_id                  TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+	position                 INTEGER NOT NULL DEFAULT 0,
+	repo                     TEXT NOT NULL,
+	kind                     TEXT NOT NULL DEFAULT '',
+	number                   INTEGER NOT NULL,
+	url                      TEXT NOT NULL DEFAULT '',
+	title                    TEXT NOT NULL DEFAULT '',
+	author                   TEXT NOT NULL DEFAULT '',
+	state                    TEXT NOT NULL DEFAULT '',
+	ci_status                TEXT NOT NULL DEFAULT '',
+	review_decision          TEXT NOT NULL DEFAULT '',
+	head_sha                 TEXT NOT NULL DEFAULT '',
+	commit_count             INTEGER NOT NULL DEFAULT 0,
+	comment_count            INTEGER NOT NULL DEFAULT 0,
+	review_comment_count     INTEGER NOT NULL DEFAULT 0,
+	labels                   TEXT NOT NULL DEFAULT '[]',
+	updated_at               TEXT NOT NULL DEFAULT '',
+	last_synced_at           TEXT NOT NULL DEFAULT '',
+	error                    TEXT NOT NULL DEFAULT '',
+	my_review_state          TEXT NOT NULL DEFAULT '',
+	my_reviewed_at           TEXT NOT NULL DEFAULT '',
+	is_stale_review          INTEGER NOT NULL DEFAULT 0,
+	pending_feedback         TEXT NOT NULL DEFAULT '',
+	ack_head_sha             TEXT NOT NULL DEFAULT '',
+	ack_commit_count         INTEGER NOT NULL DEFAULT 0,
+	ack_comment_count        INTEGER NOT NULL DEFAULT 0,
+	ack_review_comment_count INTEGER NOT NULL DEFAULT 0,
+	ack_state                TEXT NOT NULL DEFAULT '',
+	ack_ci_status            TEXT NOT NULL DEFAULT '',
+	ack_review_decision      TEXT NOT NULL DEFAULT '',
+	ack_updated_at           TEXT NOT NULL DEFAULT '',
+	ack_other_activity_at    TEXT NOT NULL DEFAULT '',
+	ack_at                   TEXT NOT NULL DEFAULT '',
+	prev_head_sha             TEXT NOT NULL DEFAULT '',
+	prev_commit_count         INTEGER NOT NULL DEFAULT 0,
+	prev_comment_count        INTEGER NOT NULL DEFAULT 0,
+	prev_review_comment_count INTEGER NOT NULL DEFAULT 0,
+	prev_state                TEXT NOT NULL DEFAULT '',
+	prev_ci_status            TEXT NOT NULL DEFAULT '',
+	prev_review_decision      TEXT NOT NULL DEFAULT '',
+	prev_updated_at           TEXT NOT NULL DEFAULT '',
+	prev_other_activity_at    TEXT NOT NULL DEFAULT '',
+	unread_updates     INTEGER NOT NULL DEFAULT 0,
+	update_cycles      INTEGER NOT NULL DEFAULT 0,
+	update_summary     TEXT NOT NULL DEFAULT '',
+	has_unread_updates INTEGER NOT NULL DEFAULT 0,
+	created_at         TEXT NOT NULL,
+	UNIQUE(card_id, repo, number)
+);
+CREATE INDEX IF NOT EXISTS idx_card_links_card ON card_links(card_id, position);
+`,
 }
 
 // columnDef is a column added to an existing table by a migration.
@@ -245,6 +300,41 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 		return addColumns(ctx, tx, []columnDef{
 			{"cards", "gh_pending_feedback", "TEXT NOT NULL DEFAULT ''"},
 		})
+	},
+	// 6: backfill every card's existing single GitHub link into card_links so
+	// baselines and tracking history carry over cleanly.
+	5: func(ctx context.Context, tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT `+cardColumns+` FROM cards WHERE gh_number > 0 AND gh_repo <> ''`)
+		if err != nil {
+			return err
+		}
+		var cards []*Card
+		for rows.Next() {
+			c, err := scanCard(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			cards = append(cards, c)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, c := range cards {
+			link := LinkFromCard(c)
+			link.ID = newID("lnk_")
+			link.Position = 0
+			if link.CreatedAt == "" {
+				link.CreatedAt = c.CreatedAt
+			}
+			if _, err := tx.ExecContext(ctx, cardLinkInsertSQL, link.values()...); err != nil {
+				return err
+			}
+		}
+		return nil
 	},
 }
 

@@ -168,6 +168,10 @@ type Card struct {
 	UpdateSummary    string `json:"updateSummary"`
 	HasUnreadUpdates bool   `json:"hasUnreadUpdates"`
 
+	// GHLinks holds every GitHub PR or issue tracked by this card in order
+	// (index 0 is the primary link mirrored into the top-level GH* fields).
+	GHLinks []CardLink `json:"ghLinks"`
+
 	CreatedAt string `json:"createdAt"`
 	UpdatedAt string `json:"updatedAt"`
 }
@@ -259,6 +263,9 @@ func (c *Card) normalize() error {
 	}
 	c.Tags = NormalizeTags(c.Tags)
 	c.GHLabels = c.GHLabels.nonNil()
+	if c.GHLinks == nil {
+		c.GHLinks = []CardLink{}
+	}
 	return nil
 }
 
@@ -267,6 +274,7 @@ func scanCard(row interface{ Scan(dest ...any) error }) (*Card, error) {
 	if err := row.Scan(c.fields()...); err != nil {
 		return nil, err
 	}
+	c.GHLinks = []CardLink{}
 	return &c, nil
 }
 
@@ -275,7 +283,15 @@ func getCard(ctx context.Context, q querier, id string) (*Card, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("card %q: %w", id, ErrNotFound)
 	}
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	links, err := loadCardLinks(ctx, q, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	c.GHLinks = links
+	return c, nil
 }
 
 func (s *Store) GetCard(ctx context.Context, id string) (*Card, error) {
@@ -287,16 +303,31 @@ func (s *Store) ListCards(ctx context.Context) ([]*Card, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []*Card{}
 	for rows.Next() {
 		c, err := scanCard(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	byCard, err := loadAllCardLinks(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range out {
+		if links, ok := byCard[c.ID]; ok {
+			c.GHLinks = links
+		}
+	}
+	return out, nil
 }
 
 // CardBySession returns the card linked to an AO session, or nil.
@@ -309,7 +340,15 @@ func (s *Store) CardBySession(ctx context.Context, sessionID string) (*Card, err
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	links, err := loadCardLinks(ctx, s.db, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	c.GHLinks = links
+	return c, nil
 }
 
 func columnCardIDs(ctx context.Context, q querier, columnID, exclude string) ([]string, error) {
@@ -386,6 +425,9 @@ func (s *Store) CreateCard(ctx context.Context, c *Card, events ...EventInput) (
 		if _, err := tx.ExecContext(ctx, cardInsertSQL, c.values()...); err != nil {
 			return err
 		}
+		if err := saveCardLinks(ctx, tx, c, now); err != nil {
+			return err
+		}
 		pos, err := placeCard(ctx, tx, c.ID, c.ColumnID, 0)
 		if err != nil {
 			return err
@@ -437,6 +479,9 @@ func (s *Store) UpdateCard(ctx context.Context, id string, fn func(c *Card, m *M
 		}
 		args := append(c.values()[1:], c.ID)
 		if _, err := tx.ExecContext(ctx, cardUpdateSQL, args...); err != nil {
+			return err
+		}
+		if err := saveCardLinks(ctx, tx, c, now); err != nil {
 			return err
 		}
 		if moved {

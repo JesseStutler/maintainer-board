@@ -1090,10 +1090,15 @@ func TestLinkUnlinkAndAckErrors(t *testing.T) {
 		t.Fatalf("linked = %v", out)
 	}
 
-	// Relinking to another item starts from a clean baseline.
+	// Linking another item appends it alongside existing links; replace: true
+	// swaps the links and starts from a clean baseline.
 	hn.gh.update("volcano-sh/volcano#6247", func(s *github.Snapshot) { s.Comments = 20 })
 	hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
 	out = hn.must(200, "POST", "/api/cards/"+id+"/link-github", map[string]any{"ref": "#6100"})
+	if len(out["ghLinks"].([]any)) != 2 || out["ghNumber"] != float64(6247) {
+		t.Fatalf("appended link = %v", out)
+	}
+	out = hn.must(200, "POST", "/api/cards/"+id+"/link-github", map[string]any{"ref": "#6100", "replace": true})
 	if out["ghNumber"] != float64(6100) || out["ghKind"] != "issue" || out["hasUnreadUpdates"] != false || out["ackCommentCount"] != float64(2) || out["ghHeadSha"] != "" {
 		t.Fatalf("relinked = %v", out)
 	}
@@ -2564,6 +2569,79 @@ func TestOwnPRPendingFeedbackAndReaddIgnoredSession(t *testing.T) {
 	firstRes := res["results"].([]any)[0].(map[string]any)
 	if firstRes["cardId"] != restored.ID {
 		t.Fatalf("result cardId = %v, want %q", firstRes["cardId"], restored.ID)
+	}
+}
+
+func TestIssueReplyTrackingAndMultiLinkCard(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "JesseStutler"
+
+	// Issue #6100: maintainer replied, then reporter followed up.
+	const issueKey = "volcano-sh/volcano#6100"
+	hn.gh.updateItem(issueKey, func(it *github.Item) {
+		it.Author = "reporter"
+		it.HasActorData = true
+		it.MyReview = github.MyReview{State: github.MyReviewCommented, At: "2026-11-20T10:00:00Z"}
+		it.LastOtherActivityAt = "2026-11-21T10:00:00Z"
+		it.OtherActivities = []github.Activity{
+			{At: "2026-11-21T10:00:00Z", Author: "reporter", Kind: "comment"},
+		}
+	})
+
+	// Create card linked to both PR #6247 and Issue #6100 at once.
+	created := hn.must(201, "POST", "/api/cards", map[string]any{
+		"title":     "Multi-link tracking",
+		"githubRef": "#6247 #6100",
+	})["card"].(map[string]any)
+	cardID := created["id"].(string)
+	c := hn.card(cardID)
+	if len(c.GHLinks) != 2 || c.GHLinks[0].Number != 6247 || c.GHLinks[1].Number != 6100 {
+		t.Fatalf("GHLinks = %+v", c.GHLinks)
+	}
+	// Stale reply on linked issue populates pending feedback and triages to Updates.
+	if c.GHLinks[1].PendingFeedback != "@reporter commented" || !c.GHLinks[1].IsStaleReview {
+		t.Fatalf("issue link = %+v", c.GHLinks[1])
+	}
+	if !strings.Contains(c.GHPendingFeedback, "#6100: @reporter commented") {
+		t.Fatalf("card GHPendingFeedback = %q", c.GHPendingFeedback)
+	}
+	if c.ColumnID != github.RoleUpdates {
+		t.Fatalf("triage column = %q, want %q", c.ColumnID, github.RoleUpdates)
+	}
+
+	// Promote Issue #6100 to primary.
+	hn.must(200, "POST", "/api/cards/"+cardID+"/primary-github", map[string]any{"linkId": c.GHLinks[1].ID})
+	c = hn.card(cardID)
+	if c.GHNumber != 6100 || c.GHKind != github.KindIssue || c.GHLinks[0].Number != 6100 {
+		t.Fatalf("after primary switch: GHNumber=%d GHKind=%q links=%+v", c.GHNumber, c.GHKind, c.GHLinks)
+	}
+
+	// Closing one link while the other is still open does NOT move the card to Done.
+	hn.gh.update("volcano-sh/volcano#6247", func(s *github.Snapshot) { s.State = github.StateMerged })
+	hn.must(200, "POST", "/api/cards/"+cardID+"/sync-github", nil)
+	if hn.card(cardID).ColumnID == github.RoleDone {
+		t.Fatalf("card moved to Done while issue #6100 is still open")
+	}
+
+	// Maintainer replies on Issue #6100 -> clears stale state and moves card to Waiting.
+	hn.gh.updateItem(issueKey, func(it *github.Item) {
+		it.Snapshot.Comments++
+		it.MyReview = github.MyReview{State: github.MyReviewCommented, At: "2026-11-22T10:00:00Z"}
+	})
+	hn.must(200, "POST", "/api/cards/"+cardID+"/sync-github", nil)
+	c = hn.card(cardID)
+	if c.GHLinks[0].IsStaleReview || c.GHLinks[0].PendingFeedback != "" {
+		t.Fatalf("issue stale state not cleared after reply: %+v", c.GHLinks[0])
+	}
+	if c.ColumnID != github.RoleWaiting {
+		t.Fatalf("after replying on issue: column = %q, want %q", c.ColumnID, github.RoleWaiting)
+	}
+
+	// Unlinking only the primary link promotes the remaining link.
+	hn.must(200, "POST", "/api/cards/"+cardID+"/unlink-github", map[string]any{"linkId": c.GHLinks[0].ID})
+	c = hn.card(cardID)
+	if len(c.GHLinks) != 1 || c.GHNumber != 6247 {
+		t.Fatalf("after removing primary link: GHNumber=%d links=%+v", c.GHNumber, c.GHLinks)
 	}
 }
 

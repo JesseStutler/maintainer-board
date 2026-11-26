@@ -267,6 +267,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cards/{id}/events", s.handleCardEvents)
 	mux.HandleFunc("POST /api/cards/{id}/link-github", s.handleLinkGitHub)
 	mux.HandleFunc("POST /api/cards/{id}/unlink-github", s.handleUnlinkGitHub)
+	mux.HandleFunc("POST /api/cards/{id}/primary-github", s.handlePrimaryGitHub)
 	mux.HandleFunc("POST /api/cards/{id}/sync-github", s.handleSyncCardGitHub)
 	mux.HandleFunc("POST /api/cards/{id}/ack", s.handleAck)
 	mux.HandleFunc("POST /api/cards/{id}/unreview", s.handleUnreview)

@@ -135,7 +135,10 @@ func terminalNote(state string) string {
 	return "Closed"
 }
 
-func myReviewEvent(state string) string {
+func myReviewEvent(state, kind string) string {
+	if kind == KindIssue {
+		return "Your reply posted; baseline updated"
+	}
 	switch state {
 	case MyReviewApproved:
 		return "Your review submitted (approved); baseline updated"
@@ -192,6 +195,18 @@ func initialTriageRole(in Input) string {
 		return RoleDone
 	}
 	if in.Kind == KindIssue {
+		if in.Own {
+			if live.State == StateOpen && in.OwnPendingFeedback {
+				return RoleUpdates
+			}
+			return ""
+		}
+		if in.MyReviewStale {
+			return RoleUpdates
+		}
+		if in.MyReviewState != "" {
+			return RoleWaiting
+		}
 		return ""
 	}
 	if in.Own {
@@ -261,16 +276,17 @@ func Evaluate(in Input) Result {
 		return res
 	}
 
-	// A fresh review submitted by the maintainer on someone else's PR that
-	// covers the latest head and author replies re-baselines the card and
-	// moves it out of active review queues into Ready or Waiting once.
+	// A fresh review submitted by the maintainer on someone else's PR (or a
+	// fresh reply on someone else's issue) that covers the latest head and
+	// non-self replies re-baselines the card and moves it out of active queues
+	// into Ready or Waiting once.
 	if in.MyReviewSubmitted {
 		res := Result{Track: Ack(live)}
 		res.Track.Prev = nextPrev
-		res.Events = append(res.Events, myReviewEvent(in.MyReviewState))
+		res.Events = append(res.Events, myReviewEvent(in.MyReviewState, in.Kind))
 		if in.AutoMove {
 			switch {
-			case live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0:
+			case in.Kind != KindIssue && live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0:
 				if in.ColumnRole != RoleReady && in.ColumnRole != RoleDone {
 					res.MoveToRole = RoleReady
 				}
@@ -356,12 +372,18 @@ func Evaluate(in Input) Result {
 		parts = append(parts, plural(newCommits, "commit"))
 	}
 	if in.HasActorData {
-		if !in.Own {
+		if in.Kind == KindIssue && newComments > 0 && len(in.OtherReplyAuthors) > 0 {
+			parts = append(parts, FormatCommenters(in.OtherReplyAuthors, newComments, in.Kind))
+		} else if !in.Own {
 			if newAuthorReplies > 0 {
 				parts = append(parts, fmt.Sprintf("Author replied (+%d)", newAuthorReplies))
 			}
 			if newOtherReplies > 0 {
-				parts = append(parts, plural(newOtherReplies, "response"))
+				if len(in.OtherReplyAuthors) > 0 {
+					parts = append(parts, FormatCommenters(in.OtherReplyAuthors, newOtherReplies, in.Kind))
+				} else {
+					parts = append(parts, plural(newOtherReplies, "response"))
+				}
 			}
 		} else if newOtherReplies > 0 {
 			parts = append(parts, FormatCommenters(in.OtherReplyAuthors, newOtherReplies, in.Kind))

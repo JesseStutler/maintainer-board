@@ -213,6 +213,12 @@ func cardHaystack(c *db.Card) string {
 	if c.GHNumber != 0 {
 		parts = append(parts, fmt.Sprintf("#%d %d", c.GHNumber, c.GHNumber))
 	}
+	for _, l := range c.GHLinks {
+		parts = append(parts, l.Title, l.Repo, fmt.Sprintf("#%d %d", l.Number, l.Number), strings.Join(l.Labels, " "))
+		if l.Author != "" {
+			parts = append(parts, l.Author+" @"+l.Author)
+		}
+	}
 	return db.Fold(strings.Join(parts, "\n"))
 }
 

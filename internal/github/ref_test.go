@@ -72,3 +72,39 @@ func TestFindRef(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRefsAndFindRefs(t *testing.T) {
+	const def = "volcano-sh/volcano"
+	got, err := ParseRefs("#6081, #6196 https://github.com/volcano-sh/volcano/pull/6081; volcano-sh/website#42", def)
+	if err != nil {
+		t.Fatalf("ParseRefs error: %v", err)
+	}
+	want := []Ref{
+		{Repo: def, Number: 6081},
+		{Repo: def, Number: 6196},
+		{Repo: "volcano-sh/website", Number: 42},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ParseRefs len = %d (%+v), want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i].Repo != want[i].Repo || got[i].Number != want[i].Number {
+			t.Errorf("ParseRefs[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	found := FindRefs("#6081 #6196 我们统一看一下，参考 kubeflow/trainer#12 以及 #6081", def)
+	wantFound := []Ref{
+		{Repo: def, Number: 6081},
+		{Repo: def, Number: 6196},
+		{Repo: "kubeflow/trainer", Number: 12},
+	}
+	if len(found) != len(wantFound) {
+		t.Fatalf("FindRefs = %+v, want %+v", found, wantFound)
+	}
+	for i := range wantFound {
+		if found[i] != wantFound[i] {
+			t.Errorf("FindRefs[%d] = %+v, want %+v", i, found[i], wantFound[i])
+		}
+	}
+}
