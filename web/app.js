@@ -260,13 +260,17 @@ function renderHeader() {
     aoPill.className = 'pill pill-muted';
     label.textContent = 'AO Connecting';
   } else if (board.ao.connected) {
+    const isNative = board.ao.url === 'native' || String(board.ao.url || '').startsWith('native://');
     aoPill.className = 'pill pill-success';
-    label.textContent = 'AO Connected';
-    aoPill.title = `AO daemon at ${board.ao.url}. Last sync ${relTime(board.ao.lastSyncAt) || 'pending'}.`;
+    label.textContent = isNative ? 'Native Ready' : 'AO Connected';
+    aoPill.title = isNative
+      ? `Native Codex & Copilot runtime. Last sync ${relTime(board.ao.lastSyncAt) || 'pending'}.`
+      : `AO daemon at ${board.ao.url}. Last sync ${relTime(board.ao.lastSyncAt) || 'pending'}.`;
   } else {
+    const isNative = board.ao.url === 'native' || String(board.ao.url || '').startsWith('native://');
     aoPill.className = 'pill pill-danger';
-    label.textContent = 'AO Offline';
-    aoPill.title = board.ao.error || `The AO daemon at ${board.ao.url} is not reachable.`;
+    label.textContent = isNative ? 'Runtime Offline' : 'AO Offline';
+    aoPill.title = board.ao.error || (isNative ? 'The local native runtime is not reachable.' : `The AO daemon at ${board.ao.url} is not reachable.`);
   }
   if (!board) return;
 

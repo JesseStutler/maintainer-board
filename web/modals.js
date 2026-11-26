@@ -779,7 +779,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
     h(
       'p',
       { class: 'modal-text' },
-      'AO scans the Copilot and Codex history on this machine. Imported sessions become AO sessions with their full conversation, and each one gets a card in the intake column. Agents stay stopped until you resume them.',
+      'Scans local Copilot and Codex history on this machine. Imported sessions keep their full conversation and native Session ID, and each gets a card in Inbox. Agents stay stopped until you resume them.',
     ),
     h('div', { class: 'import-search' }, h('label', { class: 'search' }, icon('search', 15), search, clearSearch), aiButton),
     h(
