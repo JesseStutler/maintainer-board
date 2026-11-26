@@ -138,6 +138,9 @@ type Card struct {
 	GHMyReviewedAt string `json:"ghMyReviewedAt"`
 	// GHIsStaleReview is true when the item changed after that review.
 	GHIsStaleReview bool `json:"ghIsStaleReview"`
+	// GHPendingFeedback summarizes reviewers who commented on the user's own
+	// open PR or issue after the user's latest commit or reply.
+	GHPendingFeedback string `json:"ghPendingFeedback"`
 
 	AckHeadSHA            string `json:"ackHeadSha"`
 	AckCommitCount        int    `json:"ackCommitCount"`
@@ -172,7 +175,7 @@ type Card struct {
 const cardColumns = `id, title, column_id, position, category, tags, ao_session_id, ao_title, summary, summary_source, notes, auto_move, origin,
 	gh_repo, gh_kind, gh_number, gh_url, gh_title, gh_author, gh_state, gh_ci_status, gh_review_decision, gh_head_sha,
 	gh_commit_count, gh_comment_count, gh_review_comment_count, gh_labels, gh_updated_at, gh_last_synced_at, gh_error,
-	gh_my_review_state, gh_my_reviewed_at, gh_is_stale_review,
+	gh_my_review_state, gh_my_reviewed_at, gh_is_stale_review, gh_pending_feedback,
 	ack_head_sha, ack_commit_count, ack_comment_count, ack_review_comment_count, ack_state, ack_ci_status, ack_review_decision, ack_updated_at, ack_other_activity_at, ack_at,
 	prev_head_sha, prev_commit_count, prev_comment_count, prev_review_comment_count, prev_state, prev_ci_status, prev_review_decision, prev_updated_at, prev_other_activity_at,
 	unread_updates, update_cycles, update_summary, has_unread_updates, created_at, updated_at`
@@ -183,7 +186,7 @@ func (c *Card) fields() []any {
 		&c.ID, &c.Title, &c.ColumnID, &c.Position, &c.Category, &c.Tags, &c.AOSessionID, &c.AOTitle, &c.Summary, &c.SummarySource, &c.Notes, &c.AutoMove, &c.Origin,
 		&c.GHRepo, &c.GHKind, &c.GHNumber, &c.GHURL, &c.GHTitle, &c.GHAuthor, &c.GHState, &c.GHCIStatus, &c.GHReviewDecision, &c.GHHeadSHA,
 		&c.GHCommitCount, &c.GHCommentCount, &c.GHReviewCommentCount, &c.GHLabels, &c.GHUpdatedAt, &c.GHLastSyncedAt, &c.GHError,
-		&c.GHMyReviewState, &c.GHMyReviewedAt, &c.GHIsStaleReview,
+		&c.GHMyReviewState, &c.GHMyReviewedAt, &c.GHIsStaleReview, &c.GHPendingFeedback,
 		&c.AckHeadSHA, &c.AckCommitCount, &c.AckCommentCount, &c.AckReviewCommentCount, &c.AckState, &c.AckCIStatus, &c.AckReviewDecision, &c.AckUpdatedAt, &c.AckOtherActivityAt, &c.AckAt,
 		&c.PrevHeadSHA, &c.PrevCommitCount, &c.PrevCommentCount, &c.PrevReviewCommentCount, &c.PrevState, &c.PrevCIStatus, &c.PrevReviewDecision, &c.PrevUpdatedAt, &c.PrevOtherActivityAt,
 		&c.UnreadUpdates, &c.UpdateCycles, &c.UpdateSummary, &c.HasUnreadUpdates, &c.CreatedAt, &c.UpdatedAt,

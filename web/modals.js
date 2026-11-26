@@ -437,7 +437,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
         .map((c) => ({ candidate: c, reason: '', kind: '' }));
     }
     return (view.candidates || [])
-      .filter((c) => !(view.hideImported && c.sessionId) && harnessOk(c) && (!view.scope || scopeOf(c) === view.scope))
+      .filter((c) => !(view.hideImported && c.cardId) && harnessOk(c) && (!view.scope || scopeOf(c) === view.scope))
       .map((c) => ({ candidate: c, reason: '', kind: '' }));
   }
 
@@ -507,10 +507,10 @@ export function openImport({ onImported, onOpenCard } = {}) {
   }
 
   function row({ candidate: c, reason, kind }) {
-    const imported = Boolean(c.sessionId);
-    const box = h('input', { type: 'checkbox', checked: view.selected.has(c.id), disabled: imported, 'aria-label': `Select ${c.title}` });
+    const onBoard = Boolean(c.cardId);
+    const box = h('input', { type: 'checkbox', checked: view.selected.has(c.id), disabled: onBoard, 'aria-label': `Select ${c.title}` });
     const toggle = () => {
-      if (imported) return;
+      if (onBoard) return;
       if (view.selected.has(c.id)) view.selected.delete(c.id);
       else view.selected.add(c.id);
       render();
@@ -529,13 +529,24 @@ export function openImport({ onImported, onOpenCard } = {}) {
       sub = h('span', { class: 'import-preview', title: c.summary || c.preview }, c.summary || c.preview);
     }
     let action;
-    if (!imported) {
-      action = h('button', { class: 'btn btn-sm import-one', type: 'button', title: 'Import this session into AO and give it a card' }, 'Import');
+    if (!onBoard) {
+      const readd = Boolean(c.sessionId);
+      action = h(
+        'button',
+        {
+          class: 'btn btn-sm import-one',
+          type: 'button',
+          title: readd
+            ? `Session ${c.sessionId} is already in AO without a board card. Click to add a card for it.`
+            : 'Import this session into AO and give it a card',
+        },
+        readd ? 'Add Card' : 'Import',
+      );
       action.addEventListener('click', (e) => {
         e.stopPropagation();
         runImport([c.id], action, true);
       });
-    } else if (c.cardId && onOpenCard) {
+    } else if (onOpenCard) {
       action = h('button', { class: 'btn btn-sm btn-ghost import-open', type: 'button', title: `Open the card of ${c.sessionId}` }, 'Open Card');
       action.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -547,7 +558,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
     }
     return h(
       'div',
-      { class: ['import-row', imported && 'is-imported', kind && `is-${kind}`], onClick: toggle, dataset: { id: c.id } },
+      { class: ['import-row', onBoard && 'is-imported', kind && `is-${kind}`], onClick: toggle, dataset: { id: c.id } },
       box,
       h('span', { class: 'import-agent', title: harnessLabel(c.harness) }, brandIcon(c.harness, 15), h('span', null, harnessLabel(c.harness))),
       h('span', { class: 'import-main' }, h('span', { class: 'import-title', title: c.title }, c.title || '(untitled session)'), sub),
@@ -569,7 +580,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
     const searching = Boolean(view.query) || view.ai.status === 'done';
     hideImported.setAttribute('aria-pressed', String(view.hideImported && !searching));
     hideImported.disabled = searching;
-    hideImported.title = searching ? 'Search results include sessions that are already imported' : 'Hide sessions that are already imported into AO';
+    hideImported.title = searching ? 'Search results include sessions that are already on the board' : 'Hide sessions that already have a card on the board';
     scope.disabled = view.ai.status === 'done';
     renderBanner();
     listEl.classList.toggle('is-stale', view.ai.status === 'running');
@@ -700,7 +711,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
   aiButton.addEventListener('click', runAISearch);
 
   selectAll.addEventListener('click', () => {
-    for (const r of rows()) if (!r.candidate.sessionId) view.selected.add(r.candidate.id);
+    for (const r of rows()) if (!r.candidate.cardId) view.selected.add(r.candidate.id);
     render();
   });
   clearSel.addEventListener('click', () => {
@@ -721,7 +732,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
       view.scope = scope.value;
       for (const id of Array.from(view.selected)) {
         const match = view.candidates.find((c) => c.id === id);
-        if (!match || match.sessionId) view.selected.delete(id);
+        if (!match || match.cardId) view.selected.delete(id);
       }
     } catch (err) {
       view.candidates = view.candidates || null;

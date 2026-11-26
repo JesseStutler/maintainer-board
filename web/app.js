@@ -11,6 +11,7 @@ import {
   emit,
   setBoard,
   setFilter,
+  toggleGlobalCompact,
   cards,
   unreadCount,
   ghRefLabel,
@@ -492,7 +493,7 @@ function init() {
   });
   $('filter-author').addEventListener('change', (e) => setFilter('author', e.target.value));
   $('filter-sort').addEventListener('change', (e) => setFilter('sort', e.target.value));
-  $('toggle-compact').addEventListener('click', () => setFilter('compact', !state.filters.compact));
+  $('toggle-compact').addEventListener('click', () => toggleGlobalCompact());
   $('toggle-updates').addEventListener('click', () => setFilter('updatesOnly', !state.filters.updatesOnly));
   $('updates-pill').addEventListener('click', () => setFilter('updatesOnly', !state.filters.updatesOnly));
   $('toggle-done').addEventListener('click', () => setFilter('showDone', !state.filters.showDone));

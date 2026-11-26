@@ -1144,6 +1144,17 @@ function reviewRow(card, mine) {
   const kind = card.ghKind === 'issue' ? 'issue' : 'pull request';
   if (isMine(card)) {
     row.appendChild(h('span', { class: 'hint' }, `You opened this ${kind}.`));
+    const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
+    if (open && card.ghPendingFeedback) {
+      row.appendChild(
+        pill(
+          'pill-warning',
+          card.ghPendingFeedback,
+          'message',
+          'Commented after your last commit or reply on GitHub. Clears automatically when you push or reply.',
+        ),
+      );
+    }
     return row;
   }
   const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';

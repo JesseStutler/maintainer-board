@@ -348,6 +348,35 @@ func lastCommitTime(commits []ghCommit) string {
 	return raw
 }
 
+// lastOwnActivity returns the newest commit, submitted review, comment, or
+// inline review comment authored by user on an item, or "" when none exist.
+func lastOwnActivity(user string, commits []ghCommit, reviews []ghReview, comments []ghComment, reviewComments []ghReviewComment) string {
+	raw := lastCommitTime(commits)
+	if user == "" {
+		return raw
+	}
+	consider := func(login, at string) {
+		if !sameUser(login, user) {
+			return
+		}
+		if After(at, raw) {
+			raw = at
+		}
+	}
+	for _, rv := range reviews {
+		if strings.ToUpper(rv.State) != "PENDING" {
+			consider(rv.Author.Login, rv.SubmittedAt)
+		}
+	}
+	for _, cm := range comments {
+		consider(cm.Author.Login, cm.CreatedAt)
+	}
+	for _, rc := range reviewComments {
+		consider(rc.User.Login, rc.CreatedAt)
+	}
+	return raw
+}
+
 // ReviewInput is everything that decides the personal review status of a
 // card after a sync.
 type ReviewInput struct {

@@ -52,6 +52,7 @@ export function approvalModeShort(mode) {
 
 const FILTER_KEY = 'mb.filters';
 const COLLAPSED_COLS_KEY = 'mb.collapsedCols';
+const COMPACT_COLS_KEY = 'mb.compactCols';
 const PINNED_CARDS_KEY = 'mb.pinnedCards';
 const DEFAULT_FILTERS = { search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true, compact: false, sort: 'manual' };
 
@@ -62,6 +63,7 @@ export const state = {
   board: null,
   filters: { ...DEFAULT_FILTERS, ...storageGet(FILTER_KEY, {}), search: '' },
   collapsedCols: new Set(storageGet(COLLAPSED_COLS_KEY, [])),
+  compactCols: new Set(storageGet(COMPACT_COLS_KEY, [])),
   pinnedCards: new Set(storageGet(PINNED_CARDS_KEY, [])),
   selectedCardId: null,
   // Server-side search result for the query identified by `key`: cards
@@ -442,6 +444,40 @@ export function toggleColumnCollapsed(columnId) {
   emit();
 }
 
+export function isColumnCompact(columnId) {
+  return Boolean(state.filters.compact || state.compactCols.has(columnId));
+}
+
+export function toggleColumnCompact(columnId) {
+  if (state.filters.compact) {
+    // Switching one column back to normal while global compact is active
+    // keeps the other columns compact as per-column overrides.
+    state.filters.compact = false;
+    state.compactCols = new Set(columns().map((c) => c.id).filter((id) => id !== columnId));
+    const { search, ...persisted } = state.filters;
+    storageSet(FILTER_KEY, persisted);
+    storageSet(COMPACT_COLS_KEY, Array.from(state.compactCols));
+    emit();
+    return;
+  }
+  if (state.compactCols.has(columnId)) state.compactCols.delete(columnId);
+  else state.compactCols.add(columnId);
+  storageSet(COMPACT_COLS_KEY, Array.from(state.compactCols));
+  emit();
+}
+
+export function toggleGlobalCompact() {
+  const next = !state.filters.compact;
+  state.filters.compact = next;
+  if (!next) {
+    state.compactCols.clear();
+    storageSet(COMPACT_COLS_KEY, []);
+  }
+  const { search, ...persisted } = state.filters;
+  storageSet(FILTER_KEY, persisted);
+  emit();
+}
+
 export function isCardPinned(cardId) {
   return state.pinnedCards.has(cardId);
 }
@@ -469,7 +505,8 @@ function activityTimestamp(card) {
 }
 
 function needsAttention(card) {
-  return Boolean(card.hasUnreadUpdates || (card.ghIsStaleReview && card.ghState !== 'MERGED' && card.ghState !== 'CLOSED'));
+  const open = card.ghState !== 'MERGED' && card.ghState !== 'CLOSED';
+  return Boolean(card.hasUnreadUpdates || (open && (card.ghIsStaleReview || card.ghPendingFeedback)));
 }
 
 /**

@@ -843,3 +843,43 @@ func TestIssueUpdates(t *testing.T) {
 	tr.poll(closed)
 	tr.expect(RoleDone, false, 0, 0, "Closed")
 }
+
+func TestLastOwnActivityAndPendingFeedback(t *testing.T) {
+	me := "JesseStutler"
+	commits := []ghCommit{
+		{OID: "aaa", CommittedDate: "2026-11-17T10:00:00Z"},
+		{OID: "bbb", CommittedDate: "2026-11-17T12:39:22Z"},
+	}
+	reviews := []ghReview{
+		{Author: ghAuthor{Login: "devzizu"}, State: "COMMENTED", Body: "nit", SubmittedAt: "2026-11-19T23:38:46Z"},
+		{Author: ghAuthor{Login: "dafu-wu"}, State: "COMMENTED", Body: "question", SubmittedAt: "2026-11-21T18:33:39Z"},
+	}
+	comments := []ghComment{
+		{Author: ghAuthor{Login: me}, Body: "rebased", CreatedAt: "2026-11-17T11:48:57Z"},
+	}
+
+	got := lastOwnActivity(me, commits, reviews, comments, nil)
+	if got != "2026-11-17T12:39:22Z" {
+		t.Fatalf("lastOwnActivity = %q, want newest commit timestamp", got)
+	}
+
+	// Own reply after last commit advances lastOwnActivity.
+	comments = append(comments, ghComment{Author: ghAuthor{Login: me}, Body: "addressed", CreatedAt: "2026-11-22T09:00:00Z"})
+	if got := lastOwnActivity(me, commits, reviews, comments, nil); got != "2026-11-22T09:00:00Z" {
+		t.Fatalf("lastOwnActivity after reply = %q, want reply timestamp", got)
+	}
+
+	// First sync on an own PR in Inbox with pending feedback lands in Updates.
+	res := Evaluate(Input{
+		Live:               openPR(),
+		FirstSync:          true,
+		AutoMove:           true,
+		ColumnRole:         RoleInbox,
+		Kind:               KindPR,
+		Own:                true,
+		OwnPendingFeedback: true,
+	})
+	if res.MoveToRole != RoleUpdates {
+		t.Fatalf("first sync move = %q, want %q", res.MoveToRole, RoleUpdates)
+	}
+}

@@ -2478,3 +2478,92 @@ func TestBoardSettingsAndApprovalMode(t *testing.T) {
 	}
 }
 
+func TestOwnPRPendingFeedbackAndReaddIgnoredSession(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "JesseStutler"
+
+	// Own PR with reviewer comments after the author's latest commit surfaces
+	// who commented on first sync and triages Inbox -> Updates.
+	hn.gh.items["volcano-sh/volcano#6291"] = &github.Item{
+		Repo:              "volcano-sh/volcano",
+		Number:            6291,
+		Kind:              github.KindPR,
+		Title:             "Fix scheduler bug",
+		URL:               "https://github.com/volcano-sh/volcano/pull/6291",
+		Author:            "JesseStutler",
+		HasActorData:      true,
+		LastCommitAt:      "2026-11-17T12:39:22Z",
+		LastOwnActivityAt: "2026-11-17T12:39:22Z",
+		OtherActivities: []github.Activity{
+			{Author: "devzizu", At: "2026-11-19T23:38:46Z", Kind: "review"},
+			{Author: "dafu-wu", At: "2026-11-21T18:33:39Z", Kind: "review"},
+		},
+		LastOtherActivityAt: "2026-11-21T18:33:39Z",
+		Snapshot: github.Snapshot{
+			State:          github.StateOpen,
+			CI:             github.CISuccess,
+			ReviewDecision: github.ReviewRequired,
+			HeadSHA:        "d6a84422c",
+			Commits:        3,
+			Comments:       2,
+			UpdatedAt:      "2026-11-21T18:33:39Z",
+		},
+	}
+
+	created := hn.must(201, "POST", "/api/cards", map[string]any{"githubRef": "#6291"})["card"].(map[string]any)
+	id := created["id"].(string)
+	c := hn.card(id)
+	if c.GHPendingFeedback != "@dafu-wu, @devzizu commented" {
+		t.Fatalf("ghPendingFeedback = %q, want %q", c.GHPendingFeedback, "@dafu-wu, @devzizu commented")
+	}
+	if c.ColumnID != "updates" {
+		t.Fatalf("columnId = %q, want updates", c.ColumnID)
+	}
+
+	// Pushing a newer commit clears ghPendingFeedback automatically.
+	hn.gh.updateItem("volcano-sh/volcano#6291", func(it *github.Item) {
+		it.LastCommitAt = "2026-11-22T08:00:00Z"
+		it.LastOwnActivityAt = "2026-11-22T08:00:00Z"
+		it.Snapshot.HeadSHA = "e7b95533d"
+		it.Snapshot.Commits = 4
+	})
+	hn.must(200, "POST", "/api/cards/"+id+"/sync-github", nil)
+	if got := hn.card(id).GHPendingFeedback; got != "" {
+		t.Fatalf("ghPendingFeedback after own push = %q, want empty", got)
+	}
+
+	// Re-adding a session that still exists in AO after its board card was
+	// deleted un-ignores it and recreates the card without calling ao.Import.
+	hn.ao.set(func() {
+		hn.ao.sessions = []ao.Session{worker("standalone-2", "codex", "PodGroup event refactor")}
+		hn.ao.candidates = []ao.ImportCandidate{
+			{ID: "cand-2", Harness: "codex", Title: "PodGroup event refactor", SessionID: "standalone-2", MessageCount: 411},
+		}
+	})
+	hn.syncAO()
+	oldCard := hn.cardBySession("standalone-2")
+	if oldCard == nil {
+		t.Fatal("expected initial card for standalone-2")
+	}
+	hn.must(200, "DELETE", "/api/cards/"+oldCard.ID, nil)
+	if hn.cardBySession("standalone-2") != nil {
+		t.Fatal("card was not deleted")
+	}
+	beforeCalls := len(hn.ao.imported)
+	res := hn.must(200, "POST", "/api/import", map[string]any{"ids": []string{"cand-2"}})
+	if res["imported"] != float64(1) || res["failed"] != float64(0) {
+		t.Fatalf("re-add import = %v", res)
+	}
+	if len(hn.ao.imported) != beforeCalls {
+		t.Fatalf("expected re-add to reuse live AO session without calling ao.Import")
+	}
+	restored := hn.cardBySession("standalone-2")
+	if restored == nil {
+		t.Fatal("re-add did not recreate card for standalone-2")
+	}
+	firstRes := res["results"].([]any)[0].(map[string]any)
+	if firstRes["cardId"] != restored.ID {
+		t.Fatalf("result cardId = %v, want %q", firstRes["cardId"], restored.ID)
+	}
+}
+

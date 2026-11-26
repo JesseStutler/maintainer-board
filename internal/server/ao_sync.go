@@ -707,9 +707,46 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
 	defer cancel()
 
+	// Sessions that are already imported in AO (e.g. their board card was
+	// previously deleted or unlinked, putting them in ignored_sessions) only
+	// need to be un-ignored and synced back onto the board.
+	existingSession := map[string]string{}
+	if entries, err := s.importHistory(ctx, false); err == nil {
+		liveSessions := map[string]bool{}
+		if sessions, err := s.ao.ListSessions(ctx); err == nil {
+			for _, sess := range sessions {
+				if !sess.IsTerminated {
+					liveSessions[sess.ID] = true
+				}
+			}
+		}
+		for _, e := range entries {
+			if e.view.SessionID != "" && liveSessions[e.view.SessionID] {
+				existingSession[e.view.ID] = e.view.SessionID
+			}
+		}
+	}
+
+	var toImport []string
+	var results []ao.ImportResult
+	for _, id := range req.IDs {
+		if sid, ok := existingSession[id]; ok {
+			results = append(results, ao.ImportResult{ID: id, Status: "imported", SessionID: sid})
+		} else {
+			toImport = append(toImport, id)
+		}
+	}
+
 	s.aoSyncMu.Lock()
-	results, err := s.ao.Import(ctx, req.IDs)
-	if err == nil {
+	var importErr error
+	if len(toImport) > 0 {
+		var aoResults []ao.ImportResult
+		aoResults, importErr = s.ao.Import(ctx, toImport)
+		if importErr == nil {
+			results = append(results, aoResults...)
+		}
+	}
+	if importErr == nil {
 		for _, res := range results {
 			if res.SessionID != "" {
 				// A previously deleted card must not block a deliberate re-import.
@@ -719,8 +756,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 	s.aoSyncMu.Unlock()
 	s.forgetImportCandidates()
-	if err != nil {
-		s.writeAOError(w, err)
+	if importErr != nil {
+		s.writeAOError(w, importErr)
 		return
 	}
 	s.syncAO(ctx)

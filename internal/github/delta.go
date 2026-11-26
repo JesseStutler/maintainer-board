@@ -95,6 +95,9 @@ type Input struct {
 	// MyReviewStale is true when the user's GitHub review is out of date
 	// (newer commits or non-self comments/reviews exist).
 	MyReviewStale bool
+	// OwnPendingFeedback is true when another person commented on the user's
+	// own open PR or issue after the user's latest commit or reply.
+	OwnPendingFeedback bool
 	// LatestOtherActivityAt is the newest non-self, non-bot activity timestamp.
 	LatestOtherActivityAt string
 	// PrevOtherActivityAt is LatestOtherActivityAt from the previous poll.
@@ -152,7 +155,9 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("+%d %ss", n, noun)
 }
 
-func formatCommenters(authors []string, count int, kind string) string {
+// FormatCommenters builds a concise summary of who commented (e.g.
+// "@alice commented", "@bob, @alice commented", or "@carol +2 commented").
+func FormatCommenters(authors []string, count int, kind string) string {
 	switch len(authors) {
 	case 0:
 		if kind == KindIssue {
@@ -193,7 +198,7 @@ func initialTriageRole(in Input) string {
 		switch {
 		case live.State == StateOpen && live.ReviewDecision == ReviewApproved && live.CI == CISuccess && in.UnresolvedThreads <= 0:
 			return RoleReady
-		case live.State == StateOpen && live.ReviewDecision == ReviewChangesRequested:
+		case live.State == StateOpen && (live.ReviewDecision == ReviewChangesRequested || in.OwnPendingFeedback):
 			return RoleUpdates
 		default:
 			return ""
@@ -359,7 +364,7 @@ func Evaluate(in Input) Result {
 				parts = append(parts, plural(newOtherReplies, "response"))
 			}
 		} else if newOtherReplies > 0 {
-			parts = append(parts, formatCommenters(in.OtherReplyAuthors, newOtherReplies, in.Kind))
+			parts = append(parts, FormatCommenters(in.OtherReplyAuthors, newOtherReplies, in.Kind))
 		}
 	} else if newComments > 0 {
 		parts = append(parts, plural(newComments, "comment"))

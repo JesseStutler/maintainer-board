@@ -1130,11 +1130,16 @@ body.drawer-open .board {
 .column-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex: none;
   height: 44px;
   padding: 0 8px 0 14px;
   border-bottom: 1px solid var(--border-muted);
+}
+
+.column-compact-btn.is-active {
+  color: var(--accent);
+  background: var(--accent-subtle);
 }
 
 .column-accent {
@@ -1330,34 +1335,143 @@ body.drawer-open .board {
   white-space: nowrap;
 }
 
-/* Compact density mode: hide summaries and tags to fit more cards per column. */
+/* Compact density mode: applies globally or per column (.column.is-compact).
+   Collapses cards to dense 2-line rows with inline agent/time metadata and
+   keeps only actionable warning/danger chips and unread banners visible. */
 
-body.is-compact .column-body {
-  gap: 6px;
-  padding: 8px;
+.column.is-compact .column-body {
+  gap: 4px;
+  padding: 6px;
 }
 
-body.is-compact .card {
-  gap: 5px;
-  padding: 8px 10px;
+.column.is-compact .card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
 }
 
-body.is-compact .card-summary,
-body.is-compact .card-tags {
+.column.is-compact .card-top {
+  grid-column: 1;
+  grid-row: 1;
+  gap: 4px;
+}
+
+.column.is-compact .card-top:has(.gh-pill) .badge[class*="badge-cat-"] {
   display: none;
 }
 
-body.is-compact .card-title {
-  font-size: 13.5px;
-  line-height: 1.3;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+.column.is-compact .gh-pill {
+  height: 17px;
+  font-size: 11px;
+}
+
+.column.is-compact .gh-ref,
+.column.is-compact .gh-state {
+  padding: 0 5px;
+}
+
+.column.is-compact .card-author {
+  justify-content: flex-start;
+  font-size: 11px;
+}
+
+.column.is-compact .card-author .badge-mine {
+  height: 16px;
+  padding: 0 5px;
+  font-size: 10px;
+}
+
+.column.is-compact .card-foot {
+  grid-column: 2;
+  grid-row: 1;
+  flex: none;
+  gap: 5px;
+  padding-top: 0;
+  border-top: 0;
+  font-size: 11px;
+}
+
+.column.is-compact .card-foot .spacer,
+.column.is-compact .card-foot .agent-name,
+.column.is-compact .card-foot .agent-state > span:last-child {
+  display: none;
+}
+
+.column.is-compact .card-foot .agent {
+  gap: 3px;
+}
+
+.column.is-compact .card-foot .brand-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.column.is-compact .card-title {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  font-size: 12.5px;
+  line-height: 1.28;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.column.is-compact .card-summary,
+.column.is-compact .card-tags,
+.column.is-compact .card-counts {
+  display: none;
+}
+
+.column.is-compact .card-match {
+  grid-column: 1 / -1;
+  padding: 2px 6px;
+  font-size: 11.5px;
+}
+
+.column.is-compact .card-status {
+  grid-column: 1 / -1;
+  gap: 4px;
+}
+
+.column.is-compact .card-status .chip:not(.chip-warning):not(.chip-danger) {
+  display: none;
+}
+
+.column.is-compact .card-status:not(:has(.chip-warning, .chip-danger)) {
+  display: none;
+}
+
+.column.is-compact .card-status .chip {
+  height: 18px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  max-width: 100%;
   overflow: hidden;
 }
 
-body.is-compact .card-foot {
-  padding-top: 2px;
+.column.is-compact .card-status .chip > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.column.is-compact .card-update {
+  grid-column: 1 / -1;
+  padding: 2px 6px;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.column.is-compact .card-menu-btn {
+  top: 3px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
 }
 
 .card.is-dragging {

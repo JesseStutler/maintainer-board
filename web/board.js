@@ -16,6 +16,8 @@ import {
   matchesFilters,
   isColumnCollapsed,
   toggleColumnCollapsed,
+  isColumnCompact,
+  toggleColumnCompact,
   isCardPinned,
   toggleCardPinned,
   categoryLabel,
@@ -221,6 +223,16 @@ function cardStatus(card) {
     const node = chip(CHIP_TONES[mine.tone], mine.label, mine.icon, mine.title);
     node.classList.add('chip-mine');
     node.dataset.review = mine.kind;
+    strip.appendChild(node);
+  }
+  if (isMine(card) && open && card.ghPendingFeedback && !card.hasUnreadUpdates) {
+    const node = chip(
+      'warning',
+      card.ghPendingFeedback,
+      'message',
+      'Commented after your last commit or reply on GitHub. Clears automatically when you push or reply.',
+    );
+    node.classList.add('chip-mine');
     strip.appendChild(node);
   }
   if (isPR && open) {
@@ -463,9 +475,15 @@ function renderColumn(column) {
     for (const card of visible) body.appendChild(renderCard(card));
   }
 
+  const compact = isColumnCompact(column.id);
   const el = h(
     'section',
-    { class: 'column', 'aria-label': column.title, dataset: { columnId: column.id, role: column.role }, style: { '--col-accent': column.color } },
+    {
+      class: ['column', compact && 'is-compact'],
+      'aria-label': column.title,
+      dataset: { columnId: column.id, role: column.role },
+      style: { '--col-accent': column.color },
+    },
     h(
       'header',
       { class: 'column-header' },
@@ -473,6 +491,18 @@ function renderColumn(column) {
       h('h2', { class: 'column-title', title: column.title }, column.title),
       h('span', { class: 'column-count', title: `${plural(all.length, 'card')} in this column` }, count),
       h('span', { class: 'spacer' }),
+      h(
+        'button',
+        {
+          class: ['btn', 'btn-ghost', 'btn-icon', 'btn-sm', 'column-compact-btn', compact && 'is-active'],
+          type: 'button',
+          title: compact ? `Normal card view in ${column.title}` : `Compact cards in ${column.title}`,
+          'aria-label': compact ? `Normal card view in ${column.title}` : `Compact cards in ${column.title}`,
+          'aria-pressed': String(compact),
+          onClick: () => toggleColumnCompact(column.id),
+        },
+        icon('compact', 14),
+      ),
       h(
         'button',
         { class: 'btn btn-ghost btn-icon btn-sm', type: 'button', title: `Collapse ${column.title}`, 'aria-label': `Collapse ${column.title}`, onClick: () => toggleColumnCollapsed(column.id) },

@@ -41,6 +41,10 @@ type Item struct {
 	MyReview MyReview
 	// LastCommitAt is the commit time of the newest commit of a pull request.
 	LastCommitAt string
+	// LastOwnActivityAt is the time of the current user's latest commit,
+	// comment, or review on the item; used to detect unaddressed reviewer
+	// feedback on the user's own PRs and issues.
+	LastOwnActivityAt string
 	// LastOtherActivityAt is the time of the newest comment or review by a
 	// person other than the current user; bots do not count.
 	LastOtherActivityAt string
@@ -435,6 +439,7 @@ func (c *Client) parsePR(view, rest []byte, inlineComments ...ghReviewComment) (
 		item.MyReview = myReview(user, v.Reviews, v.Comments)
 	}
 	item.LastCommitAt = lastCommitTime(v.Commits)
+	item.LastOwnActivityAt = lastOwnActivity(user, v.Commits, v.Reviews, v.Comments, inlineComments)
 	item.LastOtherActivityAt = lastOtherActivity(user, v.Reviews, v.Comments, inlineComments...)
 	if user != "" && (r.ReviewComments == 0 || len(inlineComments) > 0) {
 		item.HasActorData = true
@@ -478,6 +483,7 @@ func (c *Client) parseIssueView(data []byte) (*Item, error) {
 			Comments:  len(v.Comments),
 			UpdatedAt: v.UpdatedAt,
 		},
+		LastOwnActivityAt:   lastOwnActivity(user, nil, nil, v.Comments, nil),
 		LastOtherActivityAt: lastOtherActivity(user, nil, v.Comments),
 	}
 	if user != "" {

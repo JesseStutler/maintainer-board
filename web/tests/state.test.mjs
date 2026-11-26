@@ -4,7 +4,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { state, matchesFilters, searchMatches, myReviewInfo, showCardReviewDecision, sortColumnCards, cardAuthors, isMine, activityInfo, ciInfo, reviewInfo, AUTHOR_MINE } from '../state.js';
+import {
+  state,
+  matchesFilters,
+  searchMatches,
+  myReviewInfo,
+  showCardReviewDecision,
+  sortColumnCards,
+  cardAuthors,
+  isMine,
+  activityInfo,
+  ciInfo,
+  reviewInfo,
+  isColumnCompact,
+  toggleColumnCompact,
+  toggleGlobalCompact,
+  AUTHOR_MINE,
+} from '../state.js';
 
 function card(overrides = {}) {
   return {
@@ -194,4 +210,39 @@ test('column card sorting respects pins, recent activity, unread first, and AI r
 
   const aiMatches = new Map([['b', { rank: 0 }], ['a', { rank: 1 }], ['c', { rank: 2 }]]);
   assert.deepEqual(sortColumnCards(list, { sort: 'unread', pinned: new Set(['c']), aiMatches }).map((x) => x.id), ['b', 'a', 'c']);
+
+  // Own PR with pending reviewer feedback also bubbles up in Unread First.
+  const feedback = pr({ id: 'fb', position: 3, ghAuthor: 'JesseStutler', ghUpdatedAt: '2026-11-21T00:00:00Z', ghPendingFeedback: '@dafu-wu commented' });
+  assert.deepEqual(sortColumnCards([a, b, feedback], { sort: 'unread', pinned: new Set() }).map((x) => x.id), ['fb', 'b', 'a']);
+});
+
+test('per-column and global compact mode toggling', () => {
+  setBoard([]);
+  state.board.columns = [{ id: 'inbox' }, { id: 'waiting' }, { id: 'done' }];
+  state.filters.compact = false;
+  state.compactCols = new Set();
+
+  assert.equal(isColumnCompact('waiting'), false);
+  toggleColumnCompact('waiting');
+  assert.equal(isColumnCompact('waiting'), true);
+  assert.equal(isColumnCompact('inbox'), false);
+
+  // Global compact turns all columns compact.
+  toggleGlobalCompact();
+  assert.equal(state.filters.compact, true);
+  assert.equal(isColumnCompact('inbox'), true);
+  assert.equal(isColumnCompact('done'), true);
+
+  // Expanding one column while global compact is on keeps the others compact.
+  toggleColumnCompact('inbox');
+  assert.equal(state.filters.compact, false);
+  assert.equal(isColumnCompact('inbox'), false);
+  assert.equal(isColumnCompact('waiting'), true);
+  assert.equal(isColumnCompact('done'), true);
+
+  // Turning global compact on then off resets all columns back to normal.
+  toggleGlobalCompact();
+  toggleGlobalCompact();
+  assert.equal(isColumnCompact('waiting'), false);
+  assert.equal(isColumnCompact('done'), false);
 });

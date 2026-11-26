@@ -84,7 +84,7 @@ func clearGitHub(c *db.Card) {
 	c.GHCommitCount, c.GHCommentCount, c.GHReviewCommentCount = 0, 0, 0
 	c.GHLabels = db.StringList{}
 	c.GHUpdatedAt, c.GHLastSyncedAt, c.GHError = "", "", ""
-	c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = "", "", false
+	c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview, c.GHPendingFeedback = "", "", false, ""
 	c.AckAt, c.AckOtherActivityAt, c.PrevOtherActivityAt = "", "", ""
 	setTracking(c, github.Tracking{})
 }
@@ -152,6 +152,15 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 				github.ReviewCoversLive(item.MyReview, snap, item.LastCommitAt, item.LastOtherActivityAt)
 		}
 
+		pendingFeedback := ""
+		if own && !github.IsTerminal(snap.State) && item.HasActorData {
+			_, pendingCount := github.CountNewActivities(item.OtherActivities, item.Author, item.LastOwnActivityAt, true)
+			if pendingCount > 0 {
+				pendingAuthors := github.NewOtherAuthors(item.OtherActivities, item.Author, item.LastOwnActivityAt, true)
+				pendingFeedback = github.FormatCommenters(pendingAuthors, pendingCount, item.Kind)
+			}
+		}
+
 		review := github.EvaluateReview(github.ReviewInput{
 			GitHub:              item.MyReview,
 			StoredState:         c.GHMyReviewState,
@@ -180,6 +189,7 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			MyReviewSubmitted:     myReviewSubmitted,
 			MyReviewState:         review.State,
 			MyReviewStale:         review.Stale,
+			OwnPendingFeedback:    pendingFeedback != "",
 			LatestOtherActivityAt: item.LastOtherActivityAt,
 			PrevOtherActivityAt:   c.PrevOtherActivityAt,
 		})
@@ -194,6 +204,7 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			c.PrevOtherActivityAt = item.LastOtherActivityAt
 		}
 		c.GHMyReviewState, c.GHMyReviewedAt, c.GHIsStaleReview = review.State, review.At, review.Stale
+		c.GHPendingFeedback = pendingFeedback
 		if first {
 			c.AckAt = now
 			m.Event(db.EventGitHub, fmt.Sprintf("Linked %s %s#%d (%s); baseline recorded", kindLabel(item.Kind), item.Repo, item.Number, strings.ToLower(snap.State)))
