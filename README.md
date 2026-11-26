@@ -147,7 +147,8 @@ If you expose the board on a Tailscale IP or private hostname, pass `--allowed-h
 | `--sync-interval` | `120s` | Background GitHub sync interval (minimum `10s`). |
 | `--ao-sync-interval` | `5s` | Background AO session sync interval (minimum `1s`). |
 | `--gh-path` | `gh` | Path to the GitHub CLI binary. |
-| `--gh-user` | *(auto from `gh api user`)* | GitHub login used to identify authored PRs (`MINE`) and personal reviews. |
+| `--gh-user` | *(auto from `gh api user`)* | GitHub login used to identify authored PRs (`MINE`) and personal reviews (also configurable in UI **Settings**). |
+| `--approval-mode` | *(AO default)* | Default AO approval mode for newly spawned sessions: `default`, `accept-edits`, `auto`, or `bypass-permissions` (YOLO). Also configurable per-board in **Settings** and per-session in the card drawer. |
 | `--summary-model` | `gemini-3.8-flash` | Copilot CLI model for Summarize with AI and AI Search (empty uses CLI default). |
 | `--summary-effort` | `low` | Reasoning effort passed alongside `--summary-model`. |
 | `--copilot-path` | `copilot` | Path to the Copilot CLI binary for AI helpers. |

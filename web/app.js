@@ -23,7 +23,7 @@ import {
 } from './state.js';
 import { initBoard, renderBoard } from './board.js';
 import { initDrawer, openDrawer, closeDrawer, isDrawerOpen, updateDrawer, isDrawerExpanded, setDrawerExpanded, toggleDrawerExpanded } from './drawer.js';
-import { openNewTask, openColumns, openImport } from './modals.js';
+import { openNewTask, openColumns, openImport, openSettings } from './modals.js';
 
 const THEME_KEY = 'mb.theme';
 const NOTIFY_KEY = 'mb.notify';
@@ -427,6 +427,7 @@ function init() {
   $('btn-new').addEventListener('click', () => openNewTask({ onCreated: (card) => openDrawer(card.id) }));
   $('btn-import').addEventListener('click', () => openImport({ onImported: scheduleRefresh, onOpenCard: openImportedCard }));
   $('btn-columns').addEventListener('click', () => openColumns({ onChanged: scheduleRefresh }));
+  $('btn-settings').addEventListener('click', () => openSettings({ onSaved: scheduleRefresh }));
   $('btn-theme').addEventListener('click', () => {
     const next = currentTheme() === 'dark' ? 'light' : 'dark';
     try {

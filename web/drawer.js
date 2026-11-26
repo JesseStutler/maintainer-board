@@ -12,6 +12,9 @@ import {
   state,
   emit,
   CATEGORIES,
+  APPROVAL_MODES,
+  approvalModeLabel,
+  approvalModeShort,
   columns,
   cardById,
   columnByRole,
@@ -361,12 +364,24 @@ function build(card) {
       h('span', null, 'Stop'),
     );
     els.composerHint = h('span', { class: 'hint composer-hint' }, 'Ctrl+Enter to send');
-    // Model and effort of the next turn; filled by loadSessionModels().
+    // Model, effort and approval mode of the next turn; filled by loadSessionModels().
     els.model = h('select', { class: 'select select-sm', 'aria-label': 'Model', title: 'Model for the next turn of this session', disabled: true }, h('option', { value: '' }, 'Model'));
     els.effort = h('select', { class: 'select select-sm', 'aria-label': 'Effort', title: 'Reasoning effort for the next turn', hidden: true });
+    els.approval = select(
+      [
+        ['', 'Perms: Default'],
+        ['default', 'Perms: Ask'],
+        ['accept-edits', 'Perms: Accept edits'],
+        ['auto', 'Perms: Auto'],
+        ['bypass-permissions', 'Perms: YOLO'],
+      ],
+      '',
+      { class: 'select select-sm', 'aria-label': 'Permissions', title: 'Tool approval mode for the next turn of this session', disabled: true },
+    );
     els.model.addEventListener('change', () => changeSessionSettings({ model: els.model.value, reasoningEffort: '' }));
     els.effort.addEventListener('change', () => changeSessionSettings({ reasoningEffort: els.effort.value }));
-    els.modelPicker = h('span', { class: 'model-picker' }, els.model, els.effort);
+    els.approval.addEventListener('change', () => changeSessionSettings({ approvalMode: els.approval.value }));
+    els.modelPicker = h('span', { class: 'model-picker' }, els.model, els.effort, els.approval);
     body.appendChild(
       h(
         'div',
@@ -1251,6 +1266,15 @@ function renderAgentStart(card) {
   });
   const projects = ao.projects || [];
   const project = projects.length > 1 ? select(projects.map((p) => [p.id, p.name || p.id]), ao.defaultProject, { title: 'AO project', 'aria-label': 'AO project' }) : null;
+  const boardApproval = (state.board.settings && state.board.settings.approvalMode) || '';
+  const approval = select(
+    [['', `Board default (${approvalModeShort(boardApproval)})`], ...APPROVAL_MODES.slice(1)],
+    ctx.startApprovalMode || '',
+    { title: 'Tool approval mode for the new session', 'aria-label': 'Permissions' },
+  );
+  approval.addEventListener('change', () => {
+    ctx.startApprovalMode = approval.value;
+  });
   const start = h(
     'button',
     {
@@ -1262,6 +1286,7 @@ function renderAgentStart(card) {
             harness: harness.value,
             prompt: prompt.value,
             projectId: project ? project.value : '',
+            approvalMode: approval.value,
             ...picker.value(),
           });
           toast(`Started ${harnessLabel(harness.value)} session ${updated.aoSessionId}.`, 'success');
@@ -1313,7 +1338,7 @@ function renderAgentStart(card) {
       'div',
       { class: 'panel start-session' },
       h('div', { class: 'row' }, harness, project, h('span', { class: 'hint' }, 'Starts a new AO worker session in chat mode.')),
-      h('div', { class: 'row' }, h('label', { class: 'inline-field' }, h('span', { class: 'hint' }, 'Model'), picker.model), effortWrap),
+      h('div', { class: 'row' }, h('label', { class: 'inline-field' }, h('span', { class: 'hint' }, 'Model'), picker.model), effortWrap, h('label', { class: 'inline-field' }, h('span', { class: 'hint' }, 'Permissions'), approval)),
       prompt,
       h('div', { class: 'row' }, start),
       free.length > 0 ? linkRow : null,
@@ -1350,6 +1375,18 @@ function renderSessionBar(card) {
         { class: 'session-model', title: `Model for the next turn${chosen.reasoningEffort ? `, reasoning effort ${chosen.reasoningEffort}` : ''}. Change it next to the message box.` },
         h('span', { class: 'name' }, known ? known.label : chosen.model),
         chosen.reasoningEffort ? h('span', { class: 'effort' }, chosen.reasoningEffort) : null,
+      ),
+    );
+  }
+  if (chosen && chosen.approvalMode) {
+    nodes.push(
+      h(
+        'span',
+        {
+          class: ['session-approval', chosen.approvalMode === 'bypass-permissions' && 'is-yolo'],
+          title: `Tool permissions for the next turn: ${approvalModeLabel(chosen.approvalMode)}. Change it next to the message box.`,
+        },
+        approvalModeShort(chosen.approvalMode),
       ),
     );
   }
@@ -1480,7 +1517,7 @@ function renderSessionAlerts(card) {
     }
   } else if (session.activity && (session.activity.state === 'waiting_input' || session.activity.state === 'blocked')) {
     nodes.push(
-      alertBox('warning', 'alert', 'The agent is waiting for input', 'Answer a question by sending a message below. Tool approval prompts have to be answered in AO desktop.'),
+      alertBox('warning', 'alert', 'The agent is waiting for input', 'Answer a question by sending a message below. Tool approval prompts require AO desktop unless you switch Permissions to YOLO below.'),
     );
   }
 
@@ -1647,6 +1684,7 @@ async function loadSessionModels() {
     active.els.model.disabled = true;
     active.els.model.title = `The model list could not be loaded: ${err.message}`;
     active.els.effort.hidden = true;
+    if (active.els.approval) active.els.approval.disabled = true;
     rerender('sessionBar');
     return;
   }
@@ -1666,27 +1704,45 @@ function renderSessionModels() {
   const hasEfforts = fillEffortSelect(els.effort, effectiveModel(models.models, els.model.value), models.selected.reasoningEffort || '');
   els.effort.hidden = !hasEfforts;
   els.effort.disabled = !usable;
+  if (els.approval) {
+    const mode = models.selected.approvalMode || '';
+    if (!Array.from(els.approval.options).some((o) => o.value === mode)) {
+      els.approval.appendChild(new Option(`Perms: ${mode}`, mode));
+    }
+    els.approval.value = mode;
+    els.approval.disabled = !usable;
+    els.approval.title = models.needsResume
+      ? 'Tool approval mode for this session. Applies once you resume it.'
+      : 'Tool approval mode for the next turn of this session';
+  }
   rerender('sessionBar');
 }
 
-/** Sends a model or effort change to AO and confirms it, or rolls it back. */
+/** Sends a model, effort or approval mode change to AO and confirms it, or rolls it back. */
 async function changeSessionSettings(change) {
   if (!ctx || !ctx.models) return;
   const active = ctx;
   const { els } = active;
   els.model.disabled = true;
   els.effort.disabled = true;
+  if (els.approval) els.approval.disabled = true;
   try {
     const res = await api.patch(cardPath(active.cardId, '/settings'), change);
     if (ctx !== active) return;
     active.models = { ...active.models, selected: res.selected, needsResume: res.needsResume };
-    const known = active.models.models.find((m) => m.id === res.selected.model);
-    const name = res.selected.model ? (known ? known.label : res.selected.model) : 'the default model';
-    const effort = res.selected.reasoningEffort ? `, effort ${res.selected.reasoningEffort}` : '';
-    toast(res.needsResume ? `Model set to ${name}${effort}. It applies once you resume the session.` : `Model set to ${name}${effort} for the next turn.`, 'success');
+    const when = res.needsResume ? 'It applies once you resume the session.' : 'Applies from the next turn.';
+    if ('approvalMode' in change && !('model' in change) && !('reasoningEffort' in change)) {
+      toast(`Permissions set to ${approvalModeLabel(res.selected.approvalMode)}. ${when}`, 'success');
+    } else {
+      const known = active.models.models.find((m) => m.id === res.selected.model);
+      const name = res.selected.model ? (known ? known.label : res.selected.model) : 'the default model';
+      const effort = res.selected.reasoningEffort ? `, effort ${res.selected.reasoningEffort}` : '';
+      toast(res.needsResume ? `Model set to ${name}${effort}. It applies once you resume the session.` : `Model set to ${name}${effort} for the next turn.`, 'success');
+    }
   } catch (err) {
     if (ctx !== active) return;
-    toast(err.code === 'SESSION_NOT_FOUND' ? 'AO no longer has this session, so its model cannot be changed.' : `The model was not changed: ${err.message}`, 'error');
+    const what = 'approvalMode' in change && !('model' in change) ? 'permissions' : 'model';
+    toast(err.code === 'SESSION_NOT_FOUND' ? `AO no longer has this session, so its ${what} cannot be changed.` : `The ${what} was not changed: ${err.message}`, 'error');
   }
   if (ctx === active) renderSessionModels();
 }

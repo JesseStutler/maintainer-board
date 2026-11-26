@@ -138,9 +138,13 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			baselineAt = c.GHMyReviewedAt
 		}
 		var authorReplies, otherReplies int
+		var otherReplyAuthors []string
 		var ownReviewOnly, myReviewSubmitted bool
 		if item.HasActorData && !first {
 			authorReplies, otherReplies = github.CountNewActivities(item.OtherActivities, item.Author, baselineAt, own)
+			if own && otherReplies > 0 {
+				otherReplyAuthors = github.NewOtherAuthors(item.OtherActivities, item.Author, baselineAt, own)
+			}
 			ownReviewOnly = !own && item.MyReview.State != "" && github.After(item.MyReview.At, baselineAt) && authorReplies == 0 && otherReplies == 0
 			myReviewSubmitted = !own && item.Kind == github.KindPR &&
 				item.MyReview.State != "" &&
@@ -171,6 +175,7 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 			HasActorData:          item.HasActorData,
 			AuthorReplies:         authorReplies,
 			OtherReplies:          otherReplies,
+			OtherReplyAuthors:     otherReplyAuthors,
 			OwnReviewOnly:         ownReviewOnly,
 			MyReviewSubmitted:     myReviewSubmitted,
 			MyReviewState:         review.State,
@@ -451,7 +456,7 @@ func (s *Server) handleLinkGitHub(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	ref, err := github.ParseRef(req.Ref, s.cfg.DefaultRepo)
+	ref, err := github.ParseRef(req.Ref, s.defaultRepo(r.Context()))
 	if err != nil {
 		s.writeGitHubError(w, err)
 		return

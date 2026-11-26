@@ -57,6 +57,12 @@ type userResolver interface {
 	DetectUser(ctx context.Context) (string, error)
 }
 
+// userSetter is implemented by GitHub clients whose effective login can be
+// updated when the user changes their GitHub username in board settings.
+type userSetter interface {
+	SetUser(login string)
+}
+
 // Summarizer runs the local AI CLIs: it writes card summaries and answers
 // semantic searches, and names the engine that produced the result.
 type Summarizer interface {
@@ -80,6 +86,9 @@ type Config struct {
 	// AOProject is the AO project new sessions are spawned in. Empty means
 	// the first project the daemon reports.
 	AOProject string
+	// ApprovalMode is the default AO approval mode for newly spawned
+	// sessions when the board setting has not overridden it.
+	ApprovalMode string
 	// GitHubSyncInterval is the period of the background GitHub sync.
 	GitHubSyncInterval time.Duration
 	// AOSyncInterval is the period of the background AO session sync.
@@ -128,6 +137,8 @@ type Server struct {
 	ghSyncDone     chan struct{}
 	ghLastReport   SyncReport
 	aoSyncRequests chan struct{}
+	detectedUser   string
+	ghUserOverride string
 
 	// index tracks the local conversation index; indexRequests wakes the
 	// loop that keeps it current.
@@ -162,7 +173,13 @@ func New(cfg Config, store *db.Store, aoClient AOClient, gh GitHubClient, ai Sum
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Server{
+	baseUser := strings.TrimPrefix(strings.TrimSpace(cfg.CurrentUser), "@")
+	if baseUser == "" {
+		if r, ok := gh.(userResolver); ok {
+			baseUser = r.User()
+		}
+	}
+	s := &Server{
 		cfg:            cfg,
 		store:          store,
 		ao:             aoClient,
@@ -174,10 +191,20 @@ func New(cfg Config, store *db.Store, aoClient AOClient, gh GitHubClient, ai Sum
 		sessions:       map[string]ao.Session{},
 		summaryStamp:   map[string]summaryMark{},
 		aoSyncRequests: make(chan struct{}, 1),
+		detectedUser:   baseUser,
 		index:          contentIndex{seen: map[string]indexMark{}},
 		indexRequests:  make(chan struct{}, 1),
 		bgCtx:          context.Background(),
 	}
+	if store != nil {
+		if saved, err := store.GetSetting(context.Background(), settingGitHubUser, ""); err == nil && saved != "" {
+			s.ghUserOverride = saved
+			if setter, ok := gh.(userSetter); ok {
+				setter.SetUser(saved)
+			}
+		}
+	}
+	return s
 }
 
 // Start launches the background sync loops. They stop when ctx is cancelled;

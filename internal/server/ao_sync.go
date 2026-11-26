@@ -312,13 +312,14 @@ func (s *Server) createSessionCard(ctx context.Context, sess ao.Session) (*db.Ca
 	// reference mentioned in its title such as "[PR #6247]".
 	var ref github.Ref
 	linked := false
+	defaultRepo := s.defaultRepo(ctx)
 	if len(sess.PRs) > 0 && sess.PRs[0].URL != "" {
-		if parsed, err := github.ParseRef(sess.PRs[0].URL, s.cfg.DefaultRepo); err == nil {
+		if parsed, err := github.ParseRef(sess.PRs[0].URL, defaultRepo); err == nil {
 			ref, linked = parsed, true
 		}
 	}
 	if !linked {
-		ref, linked = github.FindRef(sess.DisplayName, s.cfg.DefaultRepo)
+		ref, linked = github.FindRef(sess.DisplayName, defaultRepo)
 	}
 	if linked {
 		card.GHRepo, card.GHNumber = ref.Repo, ref.Number
@@ -430,6 +431,10 @@ func (s *Server) startSession(ctx context.Context, cardID string, req agentReque
 		}
 		project = projects[0].ID
 	}
+	approvalMode := strings.TrimSpace(req.ApprovalMode)
+	if approvalMode == "" {
+		approvalMode = s.approvalMode(ctx)
+	}
 	spawnCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	sess, err := s.ao.Spawn(spawnCtx, ao.SpawnRequest{
@@ -442,6 +447,7 @@ func (s *Server) startSession(ctx context.Context, cardID string, req agentReque
 		Prompt:              strings.TrimSpace(req.Prompt),
 		Model:               req.Model,
 		Effort:              req.Effort,
+		ApprovalMode:        approvalMode,
 	})
 	if err != nil {
 		return nil, err
@@ -460,6 +466,9 @@ func (s *Server) startSession(ctx context.Context, cardID string, req agentReque
 			if req.Effort != "" {
 				started += " (effort " + req.Effort + ")"
 			}
+		}
+		if approvalMode != "" {
+			started += ", approval " + approvalMode
 		}
 		m.Event(db.EventSession, started)
 		return nil
@@ -489,7 +498,13 @@ func (s *Server) handleStartSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Agent must be copilot or codex.")
 		return
 	}
-	req.Model, req.Effort = strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort)
+	req.Model = strings.TrimSpace(req.Model)
+	req.Effort = strings.TrimSpace(req.Effort)
+	req.ApprovalMode = strings.TrimSpace(req.ApprovalMode)
+	if !ValidApprovalMode(req.ApprovalMode) {
+		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Approval mode must be empty, default, accept-edits, auto, or bypass-permissions.")
+		return
+	}
 	if err := s.validateSpawnModel(r.Context(), req); err != nil {
 		writeError(w, http.StatusBadRequest, "UNKNOWN_MODEL", capitalize(strings.TrimPrefix(err.Error(), errUnknownModel.Error()+": "))+".")
 		return

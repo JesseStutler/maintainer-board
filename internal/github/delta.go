@@ -79,6 +79,9 @@ type Input struct {
 	// OtherReplies counts non-self, non-bot comments/reviews by other people
 	// strictly after the acknowledged baseline.
 	OtherReplies int
+	// OtherReplyAuthors lists the distinct logins behind OtherReplies, ordered
+	// from most recent activity to oldest.
+	OtherReplyAuthors []string
 	// OwnReviewOnly is true when the current user submitted a review on
 	// someone else's PR after the baseline and no other person acted after.
 	OwnReviewOnly bool
@@ -147,6 +150,28 @@ func plural(n int, noun string) string {
 		return fmt.Sprintf("+1 %s", noun)
 	}
 	return fmt.Sprintf("+%d %ss", n, noun)
+}
+
+func formatCommenters(authors []string, count int, kind string) string {
+	switch len(authors) {
+	case 0:
+		if kind == KindIssue {
+			return plural(count, "comment")
+		}
+		return fmt.Sprintf("Reviewer commented (+%d)", count)
+	case 1:
+		if count > 1 {
+			return fmt.Sprintf("@%s commented (+%d)", authors[0], count)
+		}
+		return fmt.Sprintf("@%s commented", authors[0])
+	case 2:
+		if count > 2 {
+			return fmt.Sprintf("@%s, @%s commented (+%d)", authors[0], authors[1], count)
+		}
+		return fmt.Sprintf("@%s, @%s commented", authors[0], authors[1])
+	default:
+		return fmt.Sprintf("@%s +%d commented", authors[0], len(authors)-1)
+	}
 }
 
 // initialTriageRole picks the landing column on a card's first GitHub sync
@@ -334,11 +359,7 @@ func Evaluate(in Input) Result {
 				parts = append(parts, plural(newOtherReplies, "response"))
 			}
 		} else if newOtherReplies > 0 {
-			if in.Kind == KindIssue {
-				parts = append(parts, plural(newOtherReplies, "comment"))
-			} else {
-				parts = append(parts, fmt.Sprintf("Reviewer commented (+%d)", newOtherReplies))
-			}
+			parts = append(parts, formatCommenters(in.OtherReplyAuthors, newOtherReplies, in.Kind))
 		}
 	} else if newComments > 0 {
 		parts = append(parts, plural(newComments, "comment"))

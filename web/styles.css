@@ -2712,6 +2712,26 @@ details.section[open] > summary .icon {
   color: var(--text-subtle);
 }
 
+.session-approval {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.session-approval.is-yolo {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
 /* Unlink and Delete Session show their labels where there is room (the
    expanded workspace) and fall back to icons with tooltips in the drawer. */
 @container drawer (max-width: 1100px) {
@@ -2983,6 +3003,7 @@ details.section[open] > summary .icon {
 
 .model-picker {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;

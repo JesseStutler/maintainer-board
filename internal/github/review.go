@@ -297,6 +297,46 @@ func CountNewActivities(activities []Activity, itemAuthor, since string, own boo
 	return authorReplies, otherReplies
 }
 
+// NewOtherAuthors returns the distinct logins of non-self human participants
+// (excluding the item author when !own) who acted strictly after since,
+// ordered from most recent activity to oldest.
+func NewOtherAuthors(activities []Activity, itemAuthor, since string, own bool) []string {
+	type latest struct {
+		login string
+		at    string
+	}
+	byKey := map[string]latest{}
+	for _, a := range activities {
+		if a.Author == "" || !After(a.At, since) {
+			continue
+		}
+		if !own && sameUser(a.Author, itemAuthor) {
+			continue
+		}
+		key := strings.ToLower(a.Author)
+		if cur, ok := byKey[key]; !ok || After(a.At, cur.at) {
+			byKey[key] = latest{login: a.Author, at: a.At}
+		}
+	}
+	if len(byKey) == 0 {
+		return nil
+	}
+	list := make([]latest, 0, len(byKey))
+	for _, v := range byKey {
+		list = append(list, v)
+	}
+	for i := 1; i < len(list); i++ {
+		for j := i; j > 0 && After(list[j].at, list[j-1].at); j-- {
+			list[j], list[j-1] = list[j-1], list[j]
+		}
+	}
+	out := make([]string, len(list))
+	for i, v := range list {
+		out[i] = v.login
+	}
+	return out
+}
+
 func lastCommitTime(commits []ghCommit) string {
 	var latest time.Time
 	raw := ""

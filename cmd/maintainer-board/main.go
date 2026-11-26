@@ -54,6 +54,7 @@ func run() error {
 		aoSyncInterval = flag.Duration("ao-sync-interval", 5*time.Second, "AO session sync interval")
 		ghPath         = flag.String("gh-path", "gh", "path of the gh CLI")
 		ghUser         = flag.String("gh-user", "", "your GitHub login, for author and review status (default: the account gh is logged in as)")
+		approvalMode   = flag.String("approval-mode", "", "default AO approval mode for newly spawned sessions: default, accept-edits, auto, or bypass-permissions (empty uses AO's default)")
 		summaryModel   = flag.String("summary-model", summary.DefaultSummaryModel, "Copilot CLI model for Summarize with AI and AI Search; empty uses the CLI default (copilot's default model and codex remain as fallbacks)")
 		summaryEffort  = flag.String("summary-effort", summary.DefaultSummaryEffort, "reasoning effort passed with --summary-model; empty passes none (a model that rejects the effort is retried without it)")
 		copilotPath    = flag.String("copilot-path", "copilot", "path of the copilot CLI used for Summarize with AI and AI Search")
@@ -74,6 +75,9 @@ func run() error {
 
 	if !github.ValidRepo(*defaultRepo) {
 		return fmt.Errorf("invalid --default-repo %q: expected owner/name", *defaultRepo)
+	}
+	if m := strings.TrimSpace(*approvalMode); !server.ValidApprovalMode(m) {
+		return fmt.Errorf("invalid --approval-mode %q: expected default, accept-edits, auto, or bypass-permissions", *approvalMode)
 	}
 	if m := strings.TrimSpace(*summaryModel); m != "" && !summary.ValidModel(m) {
 		return fmt.Errorf("invalid --summary-model %q: expected a model name such as %s", *summaryModel, summary.DefaultSummaryModel)
@@ -129,9 +133,11 @@ func run() error {
 		DefaultRepo:        *defaultRepo,
 		AOURL:              *aoURL,
 		AOProject:          *aoProject,
+		ApprovalMode:       strings.TrimSpace(*approvalMode),
 		GitHubSyncInterval: *syncInterval,
 		AOSyncInterval:     *aoSyncInterval,
 		AllowedHosts:       splitList(*allowedHosts),
+		CurrentUser:        strings.TrimPrefix(strings.TrimSpace(*ghUser), "@"),
 		History:            history.New(*historyHome),
 		HelperDir:          helperDir,
 	}, store, ao.New(*aoURL), gh, ai, web.Files, logger)

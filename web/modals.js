@@ -4,7 +4,7 @@ import { h, relTime, plural, debounce, copyText } from './util.js';
 import { icon, brandIcon } from './icons.js';
 import { api, importHistory } from './api.js';
 import { openModal, confirmDialog, toast, toastError, withBusy, segmented, select, spinner, statusStrip } from './ui.js';
-import { state, subscribe, emit, CATEGORIES, ROLES, COLOR_PRESETS, columns, cards, columnByRole, harnessLabel } from './state.js';
+import { state, subscribe, emit, CATEGORIES, ROLES, COLOR_PRESETS, APPROVAL_MODES, approvalModeLabel, approvalModeShort, columns, cards, columnByRole, harnessLabel } from './state.js';
 import { createModelPicker } from './models.js';
 
 let fieldSeq = 0;
@@ -53,6 +53,13 @@ export function openNewTask({ columnId, onCreated } = {}) {
   const modelHint = h('span', { class: 'hint' }, 'Default lets the agent choose.');
   const modelField = field('Model', picker.model, { hint: modelHint });
   const effortField = field('Effort', picker.effort, { hint: 'Reasoning effort; higher is slower and more thorough.' });
+  const boardApproval = (board.settings && board.settings.approvalMode) || '';
+  const approvalOptions = [
+    ['', `Board default (${approvalModeShort(boardApproval)})`],
+    ...APPROVAL_MODES.slice(1),
+  ];
+  const approval = select(approvalOptions, '');
+  const approvalField = field('Permissions', approval, { hint: 'Tool approval mode for this session. Configure the board default in Settings.' });
   const existingField = field('Existing AO session', existing, { full: true, hint: 'Only sessions that are not linked to a card are listed.' });
   const agentHint = h('span', { class: 'hint' });
 
@@ -62,6 +69,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
     if (projectField) projectField.hidden = !spawning;
     modelField.hidden = !spawning;
     effortField.hidden = !spawning || !picker.hasEfforts;
+    approvalField.hidden = !spawning;
     if (spawning && board.ao.connected) picker.load(value);
     existingField.hidden = value !== 'existing';
     if (!board.ao.connected && value !== 'none') agentHint.textContent = 'AO is offline; the session cannot be started right now.';
@@ -108,6 +116,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
     h('div', { class: 'field full' }, h('span', { class: 'label' }, 'Agent session'), agent, agentHint),
     modelField,
     effortField,
+    approvalField,
     promptField,
     projectField,
     existingField,
@@ -133,7 +142,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
       return;
     }
     if (agent.value === 'copilot' || agent.value === 'codex') {
-      payload.agent = { harness: agent.value, prompt: prompt.value, projectId: project ? project.value : '', ...picker.value() };
+      payload.agent = { harness: agent.value, prompt: prompt.value, projectId: project ? project.value : '', approvalMode: approval.value, ...picker.value() };
     } else if (agent.value === 'existing') {
       if (!existing.value) {
         error.textContent = 'There is no unlinked AO session to attach. Choose another agent option.';
@@ -781,4 +790,110 @@ export function openImport({ onImported, onOpenCard } = {}) {
   importBtn.addEventListener('click', () => runImport(Array.from(view.selected), importBtn, false));
 
   load();
+}
+
+// Settings
+
+export function openSettings({ onSaved } = {}) {
+  const board = state.board;
+  if (!board) return;
+  const s = board.settings || {};
+
+  const ghUser = h('input', {
+    class: 'input mono',
+    type: 'text',
+    spellcheck: 'false',
+    value: s.githubUser || '',
+    placeholder: s.detectedUser ? `Auto-detected: @${s.detectedUser}` : 'Auto-detect from gh CLI',
+    'data-autofocus': true,
+  });
+  const defaultRepo = h('input', {
+    class: 'input mono',
+    type: 'text',
+    spellcheck: 'false',
+    value: s.defaultRepo || '',
+    placeholder: 'owner/repo',
+  });
+  const approval = select(APPROVAL_MODES, s.approvalMode || '');
+  const showOrch = h('input', { type: 'checkbox' });
+  showOrch.checked = Boolean(s.showOrchestrator);
+  const error = h('div', { class: 'field-error', role: 'alert', hidden: true });
+
+  const ghHint = s.detectedUser
+    ? `Used for MINE badges, own-PR tracking, and personal reviews. Leave blank to use the auto-detected login (@${s.detectedUser}).`
+    : 'Used for MINE badges, own-PR tracking, and personal reviews. Leave blank to auto-detect from gh CLI.';
+
+  const body = h(
+    'div',
+    { class: 'form-grid' },
+    field('GitHub username', ghUser, { full: true, hint: ghHint }),
+    field('Default repository', defaultRepo, { full: true, hint: 'Repository used for bare #123 references (owner/name).' }),
+    field('Default agent permissions', approval, {
+      full: true,
+      hint: 'Applied to newly spawned Copilot and Codex sessions. Bypass permissions (YOLO) skips interactive tool approval prompts, matching local --yolo mode.',
+    }),
+    h(
+      'div',
+      { class: 'field full' },
+      h(
+        'label',
+        { class: 'switch' },
+        showOrch,
+        h('span', { class: 'track' }),
+        h('span', { class: 'switch-label' }, 'Show AO orchestrator sessions on the board'),
+      ),
+    ),
+    h('div', { class: 'field full' }, error),
+  );
+
+  const save = h('button', { class: 'btn btn-primary', type: 'button' }, icon('check', 13), h('span', null, 'Save Settings'));
+  const cancel = h('button', { class: 'btn', type: 'button' }, 'Cancel');
+  const modal = openModal({
+    title: 'Board Settings',
+    body,
+    foot: [h('span', { class: 'hint' }, 'Stored locally in board.db'), h('span', { class: 'spacer' }), cancel, save],
+  });
+  cancel.addEventListener('click', () => modal.close());
+
+  const submit = () => {
+    error.hidden = true;
+    const prevUser = (s.githubUser || '').toLowerCase();
+    const nextUser = ghUser.value.trim().replace(/^@/, '');
+    const payload = {
+      githubUser: nextUser,
+      defaultRepo: defaultRepo.value.trim(),
+      approvalMode: approval.value,
+      showOrchestrator: showOrch.checked,
+    };
+    withBusy(
+      save,
+      async () => {
+        const updated = await api.patch('/api/settings', payload);
+        if (state.board) {
+          state.board.settings = updated;
+          state.board.currentUser = updated.githubUser || updated.detectedUser || '';
+          emit();
+        }
+        modal.close();
+        if (nextUser.toLowerCase() !== prevUser) {
+          toast('Settings saved. Click Sync GitHub to refresh personal review states.', 'success');
+        } else {
+          toast(`Settings saved (permissions: ${approvalModeLabel(updated.approvalMode)}).`, 'success');
+        }
+        if (onSaved) onSaved();
+      },
+      (err) => {
+        error.textContent = err.message;
+        error.hidden = false;
+        return true;
+      },
+    );
+  };
+  save.addEventListener('click', submit);
+  modal.el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || e.target.tagName === 'INPUT')) {
+      e.preventDefault();
+      submit();
+    }
+  });
 }

@@ -105,6 +105,9 @@ func (f *fakeAO) UpdateConversationSettings(_ context.Context, id string, settin
 	if settings.ReasoningEffort != nil {
 		m.Selected.ReasoningEffort = *settings.ReasoningEffort
 	}
+	if settings.ApprovalMode != nil {
+		m.Selected.ApprovalMode = *settings.ApprovalMode
+	}
 	out := m.Selected
 	return &out, nil
 }
@@ -2391,6 +2394,87 @@ func TestFirstSyncTriagesInboxCard(t *testing.T) {
 	manual := hn.must(201, "POST", "/api/cards", map[string]any{"githubRef": "#6291"})["card"].(map[string]any)
 	if manual["category"] != db.CategoryDev {
 		t.Fatalf("manual own PR card category = %v, want %s", manual["category"], db.CategoryDev)
+	}
+}
+
+func TestBoardSettingsAndApprovalMode(t *testing.T) {
+	hn := newHarness(t)
+	hn.srv.cfg.CurrentUser = "detected-user"
+	hn.ao.sessions = []ao.Session{worker("volcano-1", "codex", "Task")}
+	hn.ao.convModels = map[string]*ao.ConversationModels{
+		"volcano-1": {
+			Models:   []ao.ConversationModel{{ID: "gpt-5", DisplayName: "GPT-5", Default: true}},
+			Selected: ao.ConversationSettings{Model: "gpt-5"},
+		},
+	}
+	hn.syncAO()
+	cardID := hn.cardBySession("volcano-1").ID
+
+	// Reject invalid settings cleanly.
+	if code := hn.errorCode(400, "PATCH", "/api/settings", map[string]any{"approvalMode": "unsafe"}); code != "INVALID_INPUT" {
+		t.Fatalf("invalid approvalMode code = %s", code)
+	}
+	if code := hn.errorCode(400, "PATCH", "/api/settings", map[string]any{"defaultRepo": "not-a-repo"}); code != "INVALID_INPUT" {
+		t.Fatalf("invalid defaultRepo code = %s", code)
+	}
+	if code := hn.errorCode(400, "PATCH", "/api/settings", map[string]any{"githubUser": "bad user!"}); code != "INVALID_INPUT" {
+		t.Fatalf("invalid githubUser code = %s", code)
+	}
+
+	// Update settings: githubUser, defaultRepo, and default approvalMode.
+	out := hn.must(200, "PATCH", "/api/settings", map[string]any{
+		"githubUser":   "@colleague",
+		"defaultRepo":  "other-org/other-repo",
+		"approvalMode": "bypass-permissions",
+	})
+	if out["githubUser"] != "colleague" || out["defaultRepo"] != "other-org/other-repo" || out["approvalMode"] != "bypass-permissions" {
+		t.Fatalf("settings = %v", out)
+	}
+	board := hn.must(200, "GET", "/api/board", nil)
+	if board["currentUser"] != "colleague" {
+		t.Fatalf("currentUser = %v, want colleague", board["currentUser"])
+	}
+
+	// Spawning a new card session inherits the board default approvalMode.
+	hn.must(201, "POST", "/api/cards", map[string]any{
+		"title": "Run tests",
+		"agent": map[string]any{"harness": "codex", "prompt": "run go test"},
+	})
+	if got := hn.ao.spawned[len(hn.ao.spawned)-1].ApprovalMode; got != "bypass-permissions" {
+		t.Fatalf("spawned approvalMode = %q, want bypass-permissions", got)
+	}
+
+	// An explicit per-session approvalMode overrides the board default.
+	hn.must(201, "POST", "/api/cards", map[string]any{
+		"title": "Careful edit",
+		"agent": map[string]any{"harness": "copilot", "approvalMode": "accept-edits"},
+	})
+	if got := hn.ao.spawned[len(hn.ao.spawned)-1].ApprovalMode; got != "accept-edits" {
+		t.Fatalf("explicit spawn approvalMode = %q, want accept-edits", got)
+	}
+
+	// Per-session approvalMode can be switched live without altering model.
+	if code := hn.errorCode(400, "PATCH", "/api/cards/"+cardID+"/settings", map[string]any{"approvalMode": "bogus"}); code != "INVALID_INPUT" {
+		t.Fatalf("invalid card approvalMode code = %s", code)
+	}
+	res := hn.must(200, "PATCH", "/api/cards/"+cardID+"/settings", map[string]any{"approvalMode": "bypass-permissions"})
+	sel := res["selected"].(map[string]any)
+	if sel["approvalMode"] != "bypass-permissions" {
+		t.Fatalf("selected = %v", sel)
+	}
+	lastCall := hn.ao.settingsCalls[len(hn.ao.settingsCalls)-1]
+	if lastCall != "volcano-1 model=- effort=- approval=[bypass-permissions]" {
+		t.Fatalf("settings call = %q", lastCall)
+	}
+
+	// Clearing githubUser falls back to the auto-detected login.
+	cleared := hn.must(200, "PATCH", "/api/settings", map[string]any{"githubUser": ""})
+	if cleared["githubUser"] != "" {
+		t.Fatalf("cleared githubUser = %v", cleared)
+	}
+	board = hn.must(200, "GET", "/api/board", nil)
+	if board["currentUser"] != "detected-user" {
+		t.Fatalf("currentUser after clear = %v, want detected-user", board["currentUser"])
 	}
 }
 

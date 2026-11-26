@@ -15,7 +15,23 @@ import (
 	"maintainer-board/internal/github"
 )
 
-const settingShowOrchestrator = "show_orchestrator"
+const (
+	settingShowOrchestrator = "show_orchestrator"
+	settingGitHubUser       = "github_user"
+	settingDefaultRepo      = "default_repo"
+	settingApprovalMode     = "approval_mode"
+)
+
+// ValidApprovalMode reports whether mode is an AO approval mode accepted on
+// spawn and conversation settings, or empty for AO's default.
+func ValidApprovalMode(mode string) bool {
+	switch mode {
+	case "", "default", "accept-edits", "auto", "bypass-permissions":
+		return true
+	default:
+		return false
+	}
+}
 
 type cardView struct {
 	*db.Card
@@ -46,6 +62,11 @@ type githubStatus struct {
 type boardSettings struct {
 	ShowOrchestrator bool   `json:"showOrchestrator"`
 	DefaultRepo      string `json:"defaultRepo"`
+	// GitHubUser is the explicit user override stored in settings, or ""
+	// when the board uses the auto-detected gh login (or --gh-user).
+	GitHubUser   string `json:"githubUser"`
+	DetectedUser string `json:"detectedUser"`
+	ApprovalMode string `json:"approvalMode"`
 }
 
 type boardView struct {
@@ -85,11 +106,38 @@ func (s *Server) view(c *db.Card) cardView {
 
 // currentUser returns the GitHub login of the maintainer, or "".
 func (s *Server) currentUser() string {
+	s.mu.RLock()
+	override := s.ghUserOverride
+	s.mu.RUnlock()
+	if override != "" {
+		return override
+	}
 	if s.cfg.CurrentUser != "" {
 		return s.cfg.CurrentUser
 	}
 	if r, ok := s.gh.(userResolver); ok {
 		return r.User()
+	}
+	return ""
+}
+
+// detectedGitHubUser returns the login from --gh-user or gh auto-detection,
+// ignoring any override saved in board settings.
+func (s *Server) detectedGitHubUser() string {
+	if s.cfg.CurrentUser != "" {
+		return s.cfg.CurrentUser
+	}
+	s.mu.RLock()
+	detected := s.detectedUser
+	override := s.ghUserOverride
+	s.mu.RUnlock()
+	if detected != "" {
+		return detected
+	}
+	if override == "" {
+		if r, ok := s.gh.(userResolver); ok {
+			return r.User()
+		}
 	}
 	return ""
 }
@@ -107,6 +155,15 @@ func (s *Server) resolveCurrentUser(ctx context.Context) {
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if login, err := r.DetectUser(dctx); err == nil {
+		s.mu.Lock()
+		s.detectedUser = login
+		override := s.ghUserOverride
+		s.mu.Unlock()
+		if override != "" {
+			if setter, ok := s.gh.(userSetter); ok {
+				setter.SetUser(override)
+			}
+		}
 		s.log.Info("github user detected", "login", login)
 		s.hub.Publish()
 	}
@@ -115,6 +172,33 @@ func (s *Server) resolveCurrentUser(ctx context.Context) {
 func (s *Server) showOrchestrator(ctx context.Context) bool {
 	v, err := s.store.GetSetting(ctx, settingShowOrchestrator, "false")
 	return err == nil && v == "true"
+}
+
+func (s *Server) defaultRepo(ctx context.Context) string {
+	if v, err := s.store.GetSetting(ctx, settingDefaultRepo, ""); err == nil && github.ValidRepo(v) {
+		return v
+	}
+	return s.cfg.DefaultRepo
+}
+
+func (s *Server) approvalMode(ctx context.Context) string {
+	if v, err := s.store.GetSetting(ctx, settingApprovalMode, ""); err == nil && v != "" && ValidApprovalMode(v) {
+		return v
+	}
+	return s.cfg.ApprovalMode
+}
+
+func (s *Server) boardSettings(ctx context.Context) boardSettings {
+	s.mu.RLock()
+	override := s.ghUserOverride
+	s.mu.RUnlock()
+	return boardSettings{
+		ShowOrchestrator: s.showOrchestrator(ctx),
+		DefaultRepo:      s.defaultRepo(ctx),
+		GitHubUser:       override,
+		DetectedUser:     s.detectedGitHubUser(),
+		ApprovalMode:     s.approvalMode(ctx),
+	}
 }
 
 // defaultProject returns the AO project new sessions are spawned in.
@@ -148,10 +232,7 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 		CurrentUser: s.currentUser(),
 		Columns:     cols,
 		Cards:       make([]cardView, 0, len(cards)),
-		Settings: boardSettings{
-			ShowOrchestrator: s.showOrchestrator(ctx),
-			DefaultRepo:      s.cfg.DefaultRepo,
-		},
+		Settings:    s.boardSettings(ctx),
 	}
 	for _, c := range cards {
 		if c.HasUnreadUpdates {
@@ -180,24 +261,86 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	var req struct {
-		ShowOrchestrator *bool `json:"showOrchestrator"`
+		ShowOrchestrator *bool   `json:"showOrchestrator"`
+		DefaultRepo      *string `json:"defaultRepo"`
+		GitHubUser       *string `json:"githubUser"`
+		ApprovalMode     *string `json:"approvalMode"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	var defaultRepo, ghUser, approvalMode string
+	if req.DefaultRepo != nil {
+		defaultRepo = strings.TrimSpace(*req.DefaultRepo)
+		if defaultRepo != "" && !github.ValidRepo(defaultRepo) {
+			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Default repository must be owner/name (or empty for the server default).")
+			return
+		}
+	}
+	if req.GitHubUser != nil {
+		ghUser = strings.TrimPrefix(strings.TrimSpace(*req.GitHubUser), "@")
+		if ghUser != "" && !github.ValidLogin(ghUser) {
+			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "GitHub username must be a valid GitHub login (or empty to auto-detect).")
+			return
+		}
+	}
+	if req.ApprovalMode != nil {
+		approvalMode = strings.TrimSpace(*req.ApprovalMode)
+		if !ValidApprovalMode(approvalMode) {
+			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Approval mode must be empty, default, accept-edits, auto, or bypass-permissions.")
+			return
+		}
+	}
+
+	changed := false
+	syncAO := false
 	if req.ShowOrchestrator != nil {
-		if err := s.store.SetSetting(r.Context(), settingShowOrchestrator, strconv.FormatBool(*req.ShowOrchestrator)); err != nil {
+		if err := s.store.SetSetting(ctx, settingShowOrchestrator, strconv.FormatBool(*req.ShowOrchestrator)); err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
+		changed, syncAO = true, true
+	}
+	if req.DefaultRepo != nil {
+		if err := s.store.SetSetting(ctx, settingDefaultRepo, defaultRepo); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		changed = true
+	}
+	if req.GitHubUser != nil {
+		if err := s.store.SetSetting(ctx, settingGitHubUser, ghUser); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		s.mu.Lock()
+		s.ghUserOverride = ghUser
+		s.mu.Unlock()
+		if setter, ok := s.gh.(userSetter); ok {
+			if ghUser != "" {
+				setter.SetUser(ghUser)
+			} else {
+				setter.SetUser(s.detectedGitHubUser())
+			}
+		}
+		changed = true
+	}
+	if req.ApprovalMode != nil {
+		if err := s.store.SetSetting(ctx, settingApprovalMode, approvalMode); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		changed = true
+	}
+	if changed {
 		s.hub.Publish()
+	}
+	if syncAO {
 		s.requestAOSync()
 	}
-	writeJSON(w, http.StatusOK, boardSettings{
-		ShowOrchestrator: s.showOrchestrator(r.Context()),
-		DefaultRepo:      s.cfg.DefaultRepo,
-	})
+	writeJSON(w, http.StatusOK, s.boardSettings(ctx))
 }
 
 // Columns
@@ -339,10 +482,12 @@ type agentRequest struct {
 	Harness   string `json:"harness"`
 	Prompt    string `json:"prompt"`
 	ProjectID string `json:"projectId"`
-	// Model and Effort choose the model and reasoning effort of the new
-	// session; empty means the agent's default.
-	Model  string `json:"model"`
-	Effort string `json:"effort"`
+	// Model, Effort and ApprovalMode choose the initial settings of the new
+	// session; empty falls back to the board default (for ApprovalMode) or
+	// the agent's default.
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
+	ApprovalMode string `json:"approvalMode"`
 }
 
 type createCardRequest struct {
@@ -356,9 +501,10 @@ type createCardRequest struct {
 	GitHubRef   string        `json:"githubRef"`
 	AOSessionID string        `json:"aoSessionId"`
 	Agent       *agentRequest `json:"agent"`
-	// Model and Effort are a shorthand for the fields of Agent.
-	Model  string `json:"model"`
-	Effort string `json:"effort"`
+	// Model, Effort and ApprovalMode are a shorthand for the fields of Agent.
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
+	ApprovalMode string `json:"approvalMode"`
 }
 
 type cardResponse struct {
@@ -394,7 +540,16 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		if req.Agent.Effort == "" {
 			req.Agent.Effort = req.Effort
 		}
-		req.Agent.Model, req.Agent.Effort = strings.TrimSpace(req.Agent.Model), strings.TrimSpace(req.Agent.Effort)
+		if req.Agent.ApprovalMode == "" {
+			req.Agent.ApprovalMode = req.ApprovalMode
+		}
+		req.Agent.Model = strings.TrimSpace(req.Agent.Model)
+		req.Agent.Effort = strings.TrimSpace(req.Agent.Effort)
+		req.Agent.ApprovalMode = strings.TrimSpace(req.Agent.ApprovalMode)
+		if !ValidApprovalMode(req.Agent.ApprovalMode) {
+			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Approval mode must be empty, default, accept-edits, auto, or bypass-permissions.")
+			return
+		}
 		// Checked before the card exists, so a typo does not leave a card
 		// behind without its session.
 		if err := s.validateSpawnModel(ctx, *req.Agent); err != nil {
@@ -407,7 +562,7 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	var ref *github.Ref
 	var item *github.Item
 	if req.GitHubRef != "" {
-		parsed, err := github.ParseRef(req.GitHubRef, s.cfg.DefaultRepo)
+		parsed, err := github.ParseRef(req.GitHubRef, s.defaultRepo(ctx))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_GITHUB_REF", "Unrecognized GitHub reference. Use #123, owner/repo#123 or a pull request or issue URL.")
 			return

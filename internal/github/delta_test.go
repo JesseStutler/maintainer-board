@@ -760,6 +760,75 @@ func TestDeletedCommentClearsUnread(t *testing.T) {
 	tr.expect(RoleUpdates, false, 0, 0, "")
 }
 
+func TestOwnPRCommenterSummary(t *testing.T) {
+	base := openPR()
+	cases := []struct {
+		name       string
+		activities []Activity
+		want       string
+	}{
+		{
+			name: "single reviewer one comment",
+			activities: []Activity{
+				{Author: "alice", At: "2026-04-10T10:00:00Z", Kind: "comment"},
+			},
+			want: "@alice commented",
+		},
+		{
+			name: "single reviewer multiple comments",
+			activities: []Activity{
+				{Author: "alice", At: "2026-04-10T10:00:00Z", Kind: "comment"},
+				{Author: "alice", At: "2026-04-10T10:05:00Z", Kind: "review_comment"},
+			},
+			want: "@alice commented (+2)",
+		},
+		{
+			name: "two reviewers ordered newest first",
+			activities: []Activity{
+				{Author: "alice", At: "2026-04-10T10:00:00Z", Kind: "comment"},
+				{Author: "bob", At: "2026-04-10T10:10:00Z", Kind: "review"},
+			},
+			want: "@bob, @alice commented",
+		},
+		{
+			name: "three reviewers stays compact",
+			activities: []Activity{
+				{Author: "alice", At: "2026-04-10T10:00:00Z", Kind: "comment"},
+				{Author: "bob", At: "2026-04-10T10:05:00Z", Kind: "comment"},
+				{Author: "carol", At: "2026-04-10T10:10:00Z", Kind: "review"},
+			},
+			want: "@carol +2 commented",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			since := "2026-04-10T09:00:00Z"
+			_, other := CountNewActivities(tc.activities, "me", since, true)
+			authors := NewOtherAuthors(tc.activities, "me", since, true)
+			live := base
+			live.Comments += other
+			res := Evaluate(Input{
+				Live:                  live,
+				Track:                 Ack(base),
+				AutoMove:              true,
+				ColumnRole:            RoleWaiting,
+				Kind:                  KindPR,
+				Own:                   true,
+				HasActorData:          true,
+				OtherReplies:          other,
+				OtherReplyAuthors:     authors,
+				LatestOtherActivityAt: tc.activities[len(tc.activities)-1].At,
+			})
+			if res.Track.Summary != tc.want {
+				t.Fatalf("summary = %q, want %q", res.Track.Summary, tc.want)
+			}
+			if res.MoveToRole != RoleUpdates {
+				t.Fatalf("move = %q, want %q", res.MoveToRole, RoleUpdates)
+			}
+		})
+	}
+}
+
 func TestIssueUpdates(t *testing.T) {
 	issue := Snapshot{State: StateOpen, CI: CIUnknown, Comments: 4, UpdatedAt: "t0"}
 	tr := newTracker(t, RoleWaiting)

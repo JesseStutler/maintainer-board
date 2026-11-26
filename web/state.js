@@ -22,6 +22,34 @@ export const ROLES = [
 
 export const COLOR_PRESETS = ['#6e7681', '#3b82f6', '#a855f7', '#f59e0b', '#10b981', '#52525b', '#ef4444', '#ec4899', '#14b8a6'];
 
+export const APPROVAL_MODES = [
+  ['', 'AO default'],
+  ['default', 'Ask before risky tools'],
+  ['accept-edits', 'Accept edits'],
+  ['auto', 'Auto'],
+  ['bypass-permissions', 'Bypass permissions (YOLO)'],
+];
+
+export function approvalModeLabel(mode) {
+  const hit = APPROVAL_MODES.find(([value]) => value === (mode || ''));
+  return hit ? hit[1] : mode;
+}
+
+export function approvalModeShort(mode) {
+  switch (mode) {
+    case 'default':
+      return 'Ask';
+    case 'accept-edits':
+      return 'Accept edits';
+    case 'auto':
+      return 'Auto';
+    case 'bypass-permissions':
+      return 'YOLO';
+    default:
+      return 'Default';
+  }
+}
+
 const FILTER_KEY = 'mb.filters';
 const COLLAPSED_COLS_KEY = 'mb.collapsedCols';
 const PINNED_CARDS_KEY = 'mb.pinnedCards';

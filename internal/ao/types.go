@@ -65,10 +65,11 @@ type SpawnRequest struct {
 	DisplayName         string `json:"displayName,omitempty"`
 	DisplayNameExplicit bool   `json:"displayNameExplicit,omitempty"`
 	Prompt              string `json:"prompt,omitempty"`
-	// Model and Effort choose the model and reasoning effort of the new
-	// session; empty means the agent's default.
-	Model  string `json:"model,omitempty"`
-	Effort string `json:"effort,omitempty"`
+	// Model, Effort and ApprovalMode choose the initial settings of the new
+	// session; empty means AO's / the agent's default.
+	Model        string `json:"model,omitempty"`
+	Effort       string `json:"effort,omitempty"`
+	ApprovalMode string `json:"approvalMode,omitempty"`
 }
 
 // AgentModel is one model an agent (copilot or codex) can run.

@@ -220,14 +220,15 @@ type sessionSettingsResponse struct {
 	Selected    ao.ConversationSettings `json:"selected"`
 }
 
-// handleCardSettings switches the model and reasoning effort a session uses
-// from its next turn on. Only those two settings are exposed: the approval
-// mode decides what an agent may do unasked and stays under AO's control.
+// handleCardSettings switches the model, reasoning effort, and/or approval
+// mode a session uses from its next turn on. Omitted fields are left
+// unchanged so changing model does not alter approval mode, and vice versa.
 func (s *Server) handleCardSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
 		Model           *string `json:"model"`
 		ReasoningEffort *string `json:"reasoningEffort"`
+		ApprovalMode    *string `json:"approvalMode"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -236,52 +237,74 @@ func (s *Server) handleCardSettings(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if req.Model == nil && req.ReasoningEffort == nil {
-		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Send a model, a reasoningEffort, or both.")
+	if req.Model == nil && req.ReasoningEffort == nil && req.ApprovalMode == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Send a model, reasoningEffort, or approvalMode.")
 		return
 	}
-	for _, v := range []*string{req.Model, req.ReasoningEffort} {
+	for _, v := range []*string{req.Model, req.ReasoningEffort, req.ApprovalMode} {
 		if v != nil {
 			*v = strings.TrimSpace(*v)
 		}
+	}
+	if req.ApprovalMode != nil && !ValidApprovalMode(*req.ApprovalMode) {
+		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Approval mode must be empty, default, accept-edits, auto, or bypass-permissions.")
+		return
 	}
 	current, err := s.sessionModels(ctx, card.AOSessionID)
 	if err != nil {
 		s.writeAOError(w, err)
 		return
 	}
-	model, effort := current.Selected.Model, current.Selected.ReasoningEffort
-	if req.Model != nil {
-		model = *req.Model
-	}
-	if req.ReasoningEffort != nil {
-		effort = *req.ReasoningEffort
-	}
-	agent := harnessLabel(current.Harness)
-	if agent == "" {
-		agent = "The agent"
-	}
-	if len(current.Models) > 0 {
-		if err := checkModelChoice(current.Models, model, effort, agent); err != nil {
-			writeError(w, http.StatusBadRequest, "UNKNOWN_MODEL", capitalize(strings.TrimPrefix(err.Error(), errUnknownModel.Error()+": "))+".")
-			return
+	if req.Model != nil || req.ReasoningEffort != nil {
+		model, effort := current.Selected.Model, current.Selected.ReasoningEffort
+		if req.Model != nil {
+			model = *req.Model
+		}
+		if req.ReasoningEffort != nil {
+			effort = *req.ReasoningEffort
+		}
+		agent := harnessLabel(current.Harness)
+		if agent == "" {
+			agent = "The agent"
+		}
+		if len(current.Models) > 0 {
+			if err := checkModelChoice(current.Models, model, effort, agent); err != nil {
+				writeError(w, http.StatusBadRequest, "UNKNOWN_MODEL", capitalize(strings.TrimPrefix(err.Error(), errUnknownModel.Error()+": "))+".")
+				return
+			}
 		}
 	}
 	uctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	selected, err := s.ao.UpdateConversationSettings(uctx, card.AOSessionID, ao.ConversationTurnSettings{Model: req.Model, ReasoningEffort: req.ReasoningEffort})
+	selected, err := s.ao.UpdateConversationSettings(uctx, card.AOSessionID, ao.ConversationTurnSettings{
+		Model:           req.Model,
+		ReasoningEffort: req.ReasoningEffort,
+		ApprovalMode:    req.ApprovalMode,
+	})
 	if err != nil {
 		s.writeAOError(w, err)
 		return
 	}
-	what := "the default model"
-	if selected.Model != "" {
-		what = selected.Model
+	var parts []string
+	if req.Model != nil || req.ReasoningEffort != nil {
+		what := "the default model"
+		if selected.Model != "" {
+			what = selected.Model
+		}
+		m := "model set to " + what
+		if selected.ReasoningEffort != "" {
+			m += " (effort " + selected.ReasoningEffort + ")"
+		}
+		parts = append(parts, m)
 	}
-	msg := "Agent model set to " + what
-	if selected.ReasoningEffort != "" {
-		msg += " (effort " + selected.ReasoningEffort + ")"
+	if req.ApprovalMode != nil {
+		mode := "AO default"
+		if selected.ApprovalMode != "" {
+			mode = selected.ApprovalMode
+		}
+		parts = append(parts, "approval mode set to "+mode)
 	}
+	msg := "Agent " + strings.Join(parts, ", ")
 	if current.NeedsResume {
 		msg += "; applies once the session is resumed"
 	}
