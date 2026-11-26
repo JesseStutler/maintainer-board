@@ -1384,7 +1384,7 @@ function renderAgentStart(card) {
     onChange: () => {
       effortWrap.hidden = !picker.hasEfforts;
       // While the list loads the selects are empty; keep the earlier choice.
-      if (!picker.model.disabled) ctx.startModel = picker.value();
+      if (ctx && !picker.model.disabled) ctx.startModel = picker.value();
     },
   });
   effortWrap.appendChild(picker.effort);

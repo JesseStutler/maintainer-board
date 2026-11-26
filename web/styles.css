@@ -1838,7 +1838,7 @@ body.drawer-open .board {
   border-radius: 4px;
   background: var(--bg);
   color: var(--text-subtle);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.3;
   cursor: pointer;
   white-space: nowrap;
@@ -2057,12 +2057,14 @@ body.is-resizing .drawer {
   color: var(--accent);
 }
 
-/* Agent mark, name and AO session ID of the card. */
+/* Agent mark, name and native session ID of the card. */
 .drawer-session {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   height: 28px;
   padding: 0 10px;
   border: 1px solid var(--border-muted);
@@ -2077,11 +2079,15 @@ body.is-resizing .drawer {
   font-size: 13.5px;
   font-weight: 600;
   white-space: nowrap;
+  flex: none;
 }
 
 .drawer-session .session-id {
   color: var(--text-muted);
   font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   user-select: all;
 }
 
@@ -2089,6 +2095,7 @@ body.is-resizing .drawer {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
   width: 20px;
   height: 20px;
   padding: 0;
@@ -2107,8 +2114,29 @@ body.is-resizing .drawer {
 .drawer-controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+}
+
+/* Keep Close (X) and primary header actions pinned on row 1 in the side drawer:
+   when a session chip is visible, Category/Column/Auto-move drop cleanly to row 2. */
+.drawer:not(.is-expanded) .drawer-top:has(.drawer-session:not([hidden])) .drawer-controls {
+  order: 10;
+  flex: 1 0 100%;
+  padding-top: 2px;
+}
+
+.drawer-close {
+  flex: none;
+  border: 1px solid var(--border-muted);
+  color: var(--text-muted);
+}
+
+.drawer-close:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--hover);
 }
 
 .control {

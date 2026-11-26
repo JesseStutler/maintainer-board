@@ -4,7 +4,7 @@
 
 A local Kanban board for managing GitHub PR reviews, issue threads, and parallel **Codex CLI** / **GitHub Copilot CLI** sessions in one browser tab.
 
-![Go 1.24+](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go&logoColor=white)
+![Go 1.26+](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Codex & Copilot](https://img.shields.io/badge/Agents-Codex%20%7C%20Copilot-10B981?style=flat-square)
 ![License MIT](https://img.shields.io/badge/License-MIT-6366F1?style=flat-square)
 
@@ -18,7 +18,7 @@ A local Kanban board for managing GitHub PR reviews, issue threads, and parallel
 
 ## Quick Start
 
-Requires Go 1.24+, `gh` CLI (authenticated), and `codex` and/or `copilot` CLI on `PATH`.
+Requires Go 1.26+ (or a prebuilt binary from [Releases](https://github.com/JesseStutler/maintainer-board/releases)), `gh` CLI (authenticated), and `codex` and/or `copilot` CLI on `PATH`.
 
 ```bash
 git clone https://github.com/JesseStutler/maintainer-board.git
