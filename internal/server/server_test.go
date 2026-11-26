@@ -2363,5 +2363,34 @@ func TestFirstSyncTriagesInboxCard(t *testing.T) {
 	if c2 == nil || c2.ColumnID != "waiting" || c2.GHIsStaleReview {
 		t.Fatalf("current-review card = %+v, want waiting / stale=false", c2)
 	}
+
+	// Own PR linked via an AO session with "review" in its name is corrected
+	// from PR_REVIEW to DEV on first sync, and manually creating a card for
+	// your own PR defaults to DEV as well.
+	hn.gh.items["volcano-sh/volcano#6291"] = &github.Item{
+		Repo:   "volcano-sh/volcano",
+		Kind:   github.KindPR,
+		Number: 6291,
+		Title:  "predicates: add VolumeRestrictions plugin",
+		Author: "JesseStutler",
+		Snapshot: github.Snapshot{
+			State:          github.StateOpen,
+			CI:             github.CISuccess,
+			ReviewDecision: github.ReviewRequired,
+			HeadSHA:        "sha-own",
+		},
+	}
+	hn.ao.sessions = append(hn.ao.sessions, worker("standalone-3", "codex", "ao/review-feedback #6291"))
+	hn.syncAO()
+
+	c3 := hn.cardBySession("standalone-3")
+	if c3 == nil || c3.Category != db.CategoryDev {
+		t.Fatalf("own PR imported session category = %+v, want %s", c3, db.CategoryDev)
+	}
+
+	manual := hn.must(201, "POST", "/api/cards", map[string]any{"githubRef": "#6291"})["card"].(map[string]any)
+	if manual["category"] != db.CategoryDev {
+		t.Fatalf("manual own PR card category = %v, want %s", manual["category"], db.CategoryDev)
+	}
 }
 

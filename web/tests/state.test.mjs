@@ -170,9 +170,14 @@ test('labels shown on cards', () => {
   // Distinct PR-wide decision (e.g. another maintainer approved) still shows.
   const otherApproved = pr({ ghReviewDecision: 'APPROVED', ghMyReviewState: 'COMMENTED' });
   assert.equal(showCardReviewDecision(otherApproved, myReviewInfo(otherApproved)), true);
-  // Own PR keeps Review Required because personal badge is absent.
+  // Own PR hides default Review Required on card face, but keeps Approved / Changes Req.
   const mine = pr({ ghAuthor: 'JesseStutler', ghReviewDecision: 'REVIEW_REQUIRED' });
-  assert.equal(showCardReviewDecision(mine, myReviewInfo(mine)), true);
+  assert.equal(showCardReviewDecision(mine, myReviewInfo(mine)), false);
+  assert.equal(reviewInfo('REVIEW_REQUIRED', true).label, 'Awaiting review');
+  const mineChanges = pr({ ghAuthor: 'JesseStutler', ghReviewDecision: 'CHANGES_REQUESTED' });
+  assert.equal(showCardReviewDecision(mineChanges, myReviewInfo(mineChanges)), true);
+  const mineApproved = pr({ ghAuthor: 'JesseStutler', ghReviewDecision: 'APPROVED' });
+  assert.equal(showCardReviewDecision(mineApproved, myReviewInfo(mineApproved)), true);
 });
 
 test('column card sorting respects pins, recent activity, unread first, and AI rank', () => {

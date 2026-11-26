@@ -127,6 +127,9 @@ func (s *Server) applyGitHubItem(ctx context.Context, cardID string, item *githu
 		c.GHLastSyncedAt, c.GHError = now, ""
 
 		own := isOwn(item.Author, me)
+		if first && item.Kind == github.KindPR && own && c.Category == db.CategoryPRReview {
+			c.Category = db.CategoryDev
+		}
 		baselineAt := github.LatestTime(c.AckOtherActivityAt, c.AckUpdatedAt)
 		if baselineAt == "" {
 			baselineAt = c.AckAt

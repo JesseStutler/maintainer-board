@@ -174,13 +174,16 @@ export function ciInfo(status) {
 }
 
 /** The review decision of the pull request as a whole. */
-export function reviewInfo(decision) {
+export function reviewInfo(decision, own = false) {
   switch (decision) {
     case 'APPROVED':
       return { label: 'Approved', short: 'Approved', cls: 'pill-success', tone: 'is-success', icon: 'check', title: 'Review decision: approved' };
     case 'CHANGES_REQUESTED':
       return { label: 'Changes Requested', short: 'Changes Req', cls: 'pill-danger', tone: 'is-danger', icon: 'alert', title: 'Review decision: a reviewer requested changes' };
     case 'REVIEW_REQUIRED':
+      if (own) {
+        return { label: 'Awaiting review', short: 'Awaiting review', cls: 'pill-muted', tone: '', icon: 'user', title: 'Waiting for another maintainer to approve your pull request' };
+      }
       return { label: 'Review Required', short: 'Review Required', cls: 'pill-muted', tone: '', icon: 'user', title: 'Review decision: an approving review is still required' };
     default:
       return null;
@@ -252,8 +255,11 @@ export function myReviewInfo(card) {
  */
 export function showCardReviewDecision(card, mine) {
   if (!card.ghReviewDecision) return false;
+  // On someone else's PR with a personal review badge, or on your own PR
+  // (where you are the author waiting on others), default REVIEW_REQUIRED is
+  // noisy and reads like a prompt for you to review your own work.
+  if (card.ghReviewDecision === 'REVIEW_REQUIRED' && (mine || isMine(card))) return false;
   if (!mine) return true;
-  if (card.ghReviewDecision === 'REVIEW_REQUIRED') return false;
   if (mine.kind === 'current' && card.ghReviewDecision === card.ghMyReviewState) return false;
   return true;
 }

@@ -463,7 +463,11 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	if category == "" {
 		switch {
 		case item != nil && item.Kind == github.KindPR:
-			category = db.CategoryPRReview
+			if isOwn(item.Author, s.currentUser()) {
+				category = db.CategoryDev
+			} else {
+				category = db.CategoryPRReview
+			}
 		case item != nil && item.Kind == github.KindIssue:
 			category = db.CategoryIssue
 		default:

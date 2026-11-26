@@ -166,7 +166,7 @@ function cardTime(card) {
   return { at: card.updatedAt, what: 'Card updated' };
 }
 
-/** Top row: category, linked pull request or issue with its state, author, quick actions. */
+/** Top row: category, linked pull request or issue with its state, author. */
 function cardTop(card) {
   const pinned = isCardPinned(card.id);
   const top = h('div', { class: 'card-top' }, h('span', { class: `badge badge-cat-${card.category}` }, categoryLabel(card.category)));
@@ -192,28 +192,10 @@ function cardTop(card) {
       h(
         'span',
         { class: ['card-author', mine && 'is-mine'], title: mine ? `Opened by you (@${card.ghAuthor})` : `Opened by @${card.ghAuthor}` },
-        h('span', { class: 'login' }, `@${card.ghAuthor}`),
-        mine ? h('span', { class: 'badge badge-mine' }, 'MINE') : null,
+        mine ? h('span', { class: 'badge badge-mine' }, 'MINE') : h('span', { class: 'login' }, `@${card.ghAuthor}`),
       ),
     );
   }
-  top.appendChild(
-    h(
-      'button',
-      {
-        class: 'btn btn-ghost btn-icon btn-sm card-menu-btn',
-        type: 'button',
-        title: 'Quick move or pin (or right-click card)',
-        'aria-label': 'Quick move or pin card',
-        onClick: (e) => {
-          e.stopPropagation();
-          const rect = e.currentTarget.getBoundingClientRect();
-          openCardMenu(card, { x: rect.left, y: rect.bottom + 4 });
-        },
-      },
-      icon('more', 14),
-    ),
-  );
   return top;
 }
 
@@ -232,7 +214,7 @@ function cardStatus(card) {
   const isPR = card.ghKind === 'pr';
   const mine = myReviewInfo(card);
   if (isPR && open && showCardReviewDecision(card, mine)) {
-    const review = reviewInfo(card.ghReviewDecision);
+    const review = reviewInfo(card.ghReviewDecision, isMine(card));
     if (review) strip.appendChild(chip(CHIP_TONES[review.tone], review.short, review.icon, review.title));
   }
   if (mine) {
@@ -269,6 +251,21 @@ function renderCard(card) {
       'aria-label': card.title,
       dataset: { id: card.id },
     },
+    h(
+      'button',
+      {
+        class: 'btn btn-ghost btn-icon btn-sm card-menu-btn',
+        type: 'button',
+        title: 'Quick move or pin (or right-click card)',
+        'aria-label': 'Quick move or pin card',
+        onClick: (e) => {
+          e.stopPropagation();
+          const rect = e.currentTarget.getBoundingClientRect();
+          openCardMenu(card, { x: rect.left, y: rect.bottom + 4 });
+        },
+      },
+      icon('more', 14),
+    ),
     cardTop(card),
     h('h3', { class: 'card-title' }, card.title),
   );

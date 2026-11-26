@@ -1089,7 +1089,7 @@ function renderGitHub(card) {
   if (card.ghKind === 'pr') {
     const ci = ciInfo(card.ghCiStatus);
     if (ci) strip.appendChild(pill(ci.cls, ci.label, ci.icon, ci.title));
-    const review = reviewInfo(card.ghReviewDecision);
+    const review = reviewInfo(card.ghReviewDecision, isMine(card));
     if (review) strip.appendChild(pill(review.cls, review.label, review.icon, review.title));
   }
   strip.appendChild(h('p', { class: 'gh-title' }, card.ghTitle));
