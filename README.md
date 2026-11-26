@@ -2,9 +2,7 @@
 
 # Maintainer Board
 
-**A single-binary Kanban workspace for open-source maintainers using Codex CLI and GitHub Copilot CLI.**
-
-Track PR reviews, issue threads, and parallel AI coding sessions in one place -- zero extra daemons, full native agent capabilities, and two-way terminal/web sync.
+A local Kanban board for managing GitHub PR reviews, issue threads, and parallel **Codex CLI** / **GitHub Copilot CLI** sessions in one browser tab.
 
 ![Go 1.24+](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Codex & Copilot](https://img.shields.io/badge/Agents-Codex%20%7C%20Copilot-10B981?style=flat-square)
@@ -20,7 +18,7 @@ Track PR reviews, issue threads, and parallel AI coding sessions in one place --
 
 ## Quick Start
 
-**Requirements:** Go 1.24+, `gh` CLI (logged in), and `codex` and/or `copilot` CLI on `PATH`.
+Requires Go 1.24+, `gh` CLI (authenticated), and `codex` and/or `copilot` CLI on `PATH`.
 
 ```bash
 git clone https://github.com/JesseStutler/maintainer-board.git
@@ -28,9 +26,9 @@ cd maintainer-board
 MB_WORKSPACE=/path/to/your/repo MB_REPO=your-org/your-repo ./run.sh
 ```
 
-Open **`http://127.0.0.1:3012`**.
+Open `http://127.0.0.1:3012`.
 
-Working on a remote dev machine? Forward one port from your laptop:
+If your repos and agents live on a remote dev machine, forward port `3012`:
 
 ```bash
 ssh -N -L 3012:127.0.0.1:3012 user@your-dev-machine
@@ -38,12 +36,39 @@ ssh -N -L 3012:127.0.0.1:3012 user@your-dev-machine
 
 ---
 
-## What It Does
+## Features
 
-- **Never miss a re-review:** Polls your linked PRs and Issues via `gh`, ignores bot and self noise, and moves cards automatically across `Inbox -> Updates -> Waiting -> Ready -> Done` (with Prow `/lgtm` + `/approve` and multi-link `#pr #issue` support).
-- **100% native Codex & Copilot sessions:** Talks directly to `codex app-server` and `copilot --acp` in your repo -- run tests, builds, and scripts with live expandable command output and per-session model/effort/permission controls.
-- **Two-way terminal sync:** Every card shares the exact native Session ID (`codex resume <id>` / `copilot --resume <id>`). Turns run in your terminal appear in the board and vice versa.
-- **Find any past session:** Import existing local `~/.codex` and `~/.copilot` sessions by UUID, transcript text, or fuzzy AI search.
+### 1. Automatic GitHub Sync, Card Signals & Auto-Move
+
+Maintainer Board polls linked PRs and Issues in the background via `gh` (default every 2 minutes) and keeps each card updated automatically:
+
+- **What each card shows:** PR/Issue status (`OPEN` / `MERGED` / `CLOSED`), multi-link count (`+1` when a card tracks multiple PRs and Issues), author and `MINE` tag, CI status, your personal review state (`Not reviewed`, `You: Replied`, `Re-review needed`, `Approved`), commit/comment counts, live agent status, and a click-to-copy native Session ID.
+- **Actionable update banners:** Filters out bot comments and your own activity, surfacing only real changes on the card (for example, `Author pushed +2 commits, Author replied (+1)` on PRs you review, or `Reviewer commented (+2), Changes requested` on your own PRs).
+- **Automatic column transitions:** Cards with new updates move to `Updates`; submitting a review (including Prow `/lgtm` + `/approve`) or replying to an issue moves them to `Waiting` (or `Ready` when approved with passing CI); merged or closed items move to `Done`.
+
+### 2. Search & Filtering
+
+Find cards quickly as the board grows:
+
+- **Multi-way search:** Filter by **PR/Issue author** (including `Mine`), **category**, **agent** (`Copilot` / `Codex`), **native Session ID**, **card metadata**, or **full conversation text**.
+- **AI Search:** Run natural-language semantic search across cards and chat transcripts when you only remember what a session was about.
+- **Focus controls:** Toggle `Updates Only`, pin priority cards to the top, or collapse / compact individual columns.
+
+### 3. Native Codex & Copilot Chat Workspace
+
+Click any card (or press `F` to expand) to work directly with the underlying CLI inside your local repository:
+
+- Talks straight to `codex app-server` and `copilot --acp` with no wrapper prompts, so agents can run tests, builds, and local scripts with live expandable command output in the chat.
+- Shares the same native Session IDs and disk history as your terminal (`codex resume <id>` / `copilot --resume <id>`), keeping terminal and web turns in sync.
+- Switch model, reasoning effort, and tool approval mode (`Default`, `Auto`, `YOLO`) directly from the composer, or generate concise task summaries with **AI Summary** and **AI Title**.
+
+<img src="docs/media/workspace-expanded.png" alt="Expanded Workspace" width="100%" />
+
+### 4. Local Session History Import
+
+Scan existing local `~/.codex` and `~/.copilot` sessions and bring forgotten terminal work onto the board, with instant filtering by Session ID, folder, branch, conversation text, or AI semantic search.
+
+<img src="docs/media/import-history-search.png" alt="Import Local History" width="100%" />
 
 ---
 
@@ -53,27 +78,15 @@ ssh -N -L 3012:127.0.0.1:3012 user@your-dev-machine
   <img src="docs/media/architecture.svg" alt="Maintainer Board Architecture" width="96%" />
 </p>
 
-Maintainer Board is a single Go binary with an embedded UI and local SQLite database (`board.db`). Agent processes are spawned on demand only while you chat; idle cards consume zero background agent processes.
+Everything runs in a single Go binary with an embedded web UI and a local SQLite database (`board.db`). Agent subprocesses start on demand when you resume or send a message; idle cards hold no background agent process.
 
-> Need worktree isolation via [Agent Orchestrator (`ao`)](https://github.com/ComposioHQ/agent-orchestrator)? Legacy AO mode remains available via `--runtime ao --ao-url http://127.0.0.1:3001`.
-
----
-
-## Workspace & History Import
-
-**Expanded Workspace** -- chat directly with native Codex or Copilot alongside synced PR/Issue context and live command output:
-
-<img src="docs/media/workspace-expanded.png" alt="Expanded Workspace" width="100%" />
-
-**Import Local History** -- pull existing terminal sessions straight from `~/.codex` and `~/.copilot` with keyword or AI semantic search:
-
-<img src="docs/media/import-history-search.png" alt="Import Local History" width="100%" />
+> Optional legacy mode: pass `--runtime ao --ao-url http://127.0.0.1:3001` if you want to delegate sessions to an existing [Agent Orchestrator (`ao`)](https://github.com/ComposioHQ/agent-orchestrator) daemon.
 
 ---
 
 ## Configuration
 
-Common startup options (also configurable in the top-bar **Settings** modal):
+Common flags (also editable in the UI **Settings** dialog):
 
 ```bash
 ./maintainer-board \
@@ -83,7 +96,7 @@ Common startup options (also configurable in the top-bar **Settings** modal):
   --addr 127.0.0.1:3012
 ```
 
-> **Security:** Maintainer Board controls live local agent sessions and has no built-in login layer. Keep it on `127.0.0.1` with SSH forwarding, or use Tailscale with `--allowed-hosts`.
+> **Security:** Maintainer Board controls live local agent sessions and has no login layer. Bind to `127.0.0.1` with SSH port forwarding, or use Tailscale with `--allowed-hosts`.
 
 <details>
 <summary>All CLI flags, environment variables, and development commands</summary>
