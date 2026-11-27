@@ -15,6 +15,9 @@ import {
   APPROVAL_MODES,
   approvalModeLabel,
   approvalModeShort,
+  activeRepo,
+  cardPrimaryRepo,
+  workspaceForRepo,
   columns,
   cardById,
   columnByRole,
@@ -993,8 +996,10 @@ function renderGitHub(card) {
         return;
       }
       withBusy(button, async () => {
-        const beforeCount = cardLinks(cardById(ctx.cardId)).length;
-        const updated = await api.post(cardPath(ctx.cardId, '/link-github'), { ref });
+        const current = cardById(ctx.cardId);
+        const beforeCount = cardLinks(current).length;
+        const defaultRepo = cardPrimaryRepo(current) || activeRepo();
+        const updated = await api.post(cardPath(ctx.cardId, '/link-github'), { ref, defaultRepo });
         input.value = '';
         applyCard(updated);
         const after = cardLinks(updated);
@@ -1406,7 +1411,8 @@ function renderAgentStart(card) {
     ctx.startPrompt = prompt.value;
   });
   const projects = ao.projects || [];
-  const project = projects.length > 1 ? select(projects.map((p) => [p.id, p.name || p.id]), ao.defaultProject, { title: 'AO project', 'aria-label': 'AO project' }) : null;
+  const preferredProject = workspaceForRepo(cardPrimaryRepo(card) || activeRepo()) || ao.defaultProject;
+  const project = projects.length > 1 ? select(projects.map((p) => [p.id, p.name || p.id]), preferredProject, { title: 'Workspace directory', 'aria-label': 'Workspace directory' }) : null;
   const boardApproval = (state.board.settings && state.board.settings.approvalMode) || '';
   const approval = select(
     [['', `Board default (${approvalModeShort(boardApproval)})`], ...APPROVAL_MODES.slice(1)],
@@ -1426,7 +1432,7 @@ function renderAgentStart(card) {
           const updated = await api.post(cardPath(ctx.cardId, '/session'), {
             harness: harness.value,
             prompt: prompt.value,
-            projectId: project ? project.value : '',
+            projectId: project ? project.value : preferredProject,
             approvalMode: approval.value,
             ...picker.value(),
           });

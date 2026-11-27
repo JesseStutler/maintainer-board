@@ -14,6 +14,8 @@ import {
   toggleGlobalCompact,
   cards,
   unreadCount,
+  otherReposUnreadCount,
+  boardRepoSummary,
   ghRefLabel,
   currentUser,
   cardAuthors,
@@ -24,7 +26,7 @@ import {
 } from './state.js';
 import { initBoard, renderBoard } from './board.js';
 import { initDrawer, openDrawer, closeDrawer, isDrawerOpen, updateDrawer, isDrawerExpanded, setDrawerExpanded, toggleDrawerExpanded } from './drawer.js';
-import { openNewTask, openColumns, openImport, openSettings } from './modals.js';
+import { openNewTask, openColumns, openImport, openSettings, openAddRepo } from './modals.js';
 
 const THEME_KEY = 'mb.theme';
 const NOTIFY_KEY = 'mb.notify';
@@ -248,6 +250,133 @@ function renderAuthorFilter() {
   select.classList.toggle('is-active', value !== '');
 }
 
+let repoMenuOpen = false;
+
+function closeRepoMenu() {
+  if (!repoMenuOpen) return;
+  repoMenuOpen = false;
+  const menu = $('repo-menu');
+  const btn = $('btn-repo-switcher');
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+function renderRepoMenu() {
+  const menu = $('repo-menu');
+  if (!menu || !state.board) return;
+  const summary = boardRepoSummary();
+  const selected = (state.filters.repo || '').toLowerCase();
+
+  const makeItem = ({ label, sub, count, unread, active, onClick, actionBtn }) => {
+    const meta = [];
+    if (unread > 0) meta.push(h('span', { class: 'repo-menu-badge is-unread', title: `${plural(unread, 'unread update')}` }, String(unread)));
+    meta.push(h('span', { class: 'repo-menu-count mono' }, String(count)));
+    if (actionBtn) meta.push(actionBtn);
+    return h(
+      'div',
+      {
+        class: ['repo-menu-item', active && 'is-active'],
+        role: 'menuitemradio',
+        'aria-checked': String(active),
+        tabIndex: 0,
+        onClick,
+        onKeydown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onClick();
+          }
+        },
+      },
+      h('span', { class: 'repo-menu-check' }, active ? icon('check', 13) : null),
+      h('span', { class: 'repo-menu-main' }, h('span', { class: 'repo-menu-label mono' }, label), sub ? h('span', { class: 'repo-menu-sub mono', title: sub }, sub) : null),
+      h('span', { class: 'repo-menu-meta' }, ...meta),
+    );
+  };
+
+  const nodes = [
+    makeItem({
+      label: 'All Repos',
+      sub: `Default: ${state.board.settings.defaultRepo}`,
+      count: summary.totalCount,
+      unread: summary.totalUnread,
+      active: selected === '',
+      onClick: () => {
+        setFilter('repo', '');
+        closeRepoMenu();
+      },
+    }),
+  ];
+
+  if (summary.repos.length > 0) {
+    nodes.push(h('div', { class: 'repo-menu-sep', role: 'separator' }));
+    for (const item of summary.repos) {
+      const editBtn = h(
+        'button',
+        {
+          class: 'repo-menu-edit',
+          type: 'button',
+          title: item.configured ? `Configure ${item.repo}` : `Save ${item.repo} and bind a local workspace`,
+          'aria-label': `Configure ${item.repo}`,
+          onClick: (e) => {
+            e.stopPropagation();
+            closeRepoMenu();
+            openAddRepo({ initialRepo: item.repo, initialPath: item.workspacePath || '', onAdded: scheduleRefresh });
+          },
+        },
+        icon('pencil', 11),
+      );
+      nodes.push(
+        makeItem({
+          label: item.repo,
+          sub: item.workspacePath || (item.configured ? 'No local workspace bound' : 'Discovered from cards'),
+          count: item.count,
+          unread: item.unread,
+          active: selected === item.repo.toLowerCase(),
+          actionBtn: editBtn,
+          onClick: () => {
+            setFilter('repo', item.repo);
+            closeRepoMenu();
+          },
+        }),
+      );
+    }
+  }
+
+  nodes.push(
+    h('div', { class: 'repo-menu-sep', role: 'separator' }),
+    h(
+      'button',
+      {
+        class: 'repo-menu-action',
+        type: 'button',
+        role: 'menuitem',
+        onClick: () => {
+          closeRepoMenu();
+          openAddRepo({ onAdded: scheduleRefresh });
+        },
+      },
+      icon('plus', 13),
+      h('span', null, 'Add Repository...'),
+    ),
+    h(
+      'button',
+      {
+        class: 'repo-menu-action is-muted',
+        type: 'button',
+        role: 'menuitem',
+        onClick: () => {
+          closeRepoMenu();
+          openSettings({ onSaved: scheduleRefresh });
+        },
+      },
+      icon('settings', 13),
+      h('span', null, 'Manage in Settings...'),
+    ),
+  );
+
+  menu.replaceChildren(...nodes);
+}
+
 function renderHeader() {
   const board = state.board;
   const aoPill = $('ao-status');
@@ -274,7 +403,30 @@ function renderHeader() {
   }
   if (!board) return;
 
-  $('repo-context').textContent = board.settings.defaultRepo;
+  const selectedRepo = state.filters.repo || '';
+  const repoBtn = $('btn-repo-switcher');
+  const repoLabel = $('repo-context');
+  const otherDot = $('repo-other-dot');
+  const summary = boardRepoSummary();
+  if (selectedRepo) {
+    repoLabel.textContent = selectedRepo;
+    repoBtn.classList.add('is-scoped');
+    repoBtn.title = `Showing ${selectedRepo}. Click to switch repository or add a new one.`;
+  } else if (summary.repos.length > 1) {
+    repoLabel.textContent = `All Repos (${summary.repos.length})`;
+    repoBtn.classList.remove('is-scoped');
+    repoBtn.title = `Showing all repositories. Bare #123 references resolve to ${board.settings.defaultRepo}.`;
+  } else {
+    repoLabel.textContent = board.settings.defaultRepo;
+    repoBtn.classList.remove('is-scoped');
+    repoBtn.title = `Showing ${board.settings.defaultRepo}. Click to add another repository board.`;
+  }
+  const otherUnread = otherReposUnreadCount();
+  otherDot.hidden = otherUnread === 0;
+  if (otherUnread > 0) {
+    otherDot.title = `${plural(otherUnread, 'unread update')} in other repositories`;
+  }
+  if (repoMenuOpen) renderRepoMenu();
 
   const unread = unreadCount();
   const updates = $('updates-pill');
@@ -429,6 +581,22 @@ function init() {
   initDrawer({ onRefresh: scheduleRefresh });
   subscribe(render);
 
+  $('btn-repo-switcher').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!state.board) return;
+    if (repoMenuOpen) {
+      closeRepoMenu();
+      return;
+    }
+    repoMenuOpen = true;
+    renderRepoMenu();
+    $('repo-menu').hidden = false;
+    $('btn-repo-switcher').setAttribute('aria-expanded', 'true');
+  });
+  document.addEventListener('click', (e) => {
+    if (repoMenuOpen && !$('repo-switcher').contains(e.target)) closeRepoMenu();
+  });
+
   $('btn-new').addEventListener('click', () => openNewTask({ onCreated: (card) => openDrawer(card.id) }));
   $('btn-import').addEventListener('click', () => openImport({ onImported: scheduleRefresh, onOpenCard: openImportedCard }));
   $('btn-columns').addEventListener('click', () => openColumns({ onChanged: scheduleRefresh }));
@@ -516,6 +684,10 @@ function init() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (repoMenuOpen) {
+        closeRepoMenu();
+        return;
+      }
       if (closeTopModal()) return;
       if (isDrawerOpen()) {
         // One step back at a time: leave the field, then the expanded

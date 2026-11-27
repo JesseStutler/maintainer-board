@@ -266,6 +266,8 @@ CREATE TABLE IF NOT EXISTS card_links (
 );
 CREATE INDEX IF NOT EXISTS idx_card_links_card ON card_links(card_id, position);
 `,
+// 7: explicit repository ownership column on cards; see migrationSteps.
+"",
 }
 
 // columnDef is a column added to an existing table by a migration.
@@ -304,6 +306,9 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 	// 6: backfill every card's existing single GitHub link into card_links so
 	// baselines and tracking history carry over cleanly.
 	5: func(ctx context.Context, tx *sql.Tx) error {
+	if err := addColumns(ctx, tx, []columnDef{{"cards", "repo", "TEXT NOT NULL DEFAULT ''"}}); err != nil {
+		return err
+	}
 		rows, err := tx.QueryContext(ctx, `SELECT `+cardColumns+` FROM cards WHERE gh_number > 0 AND gh_repo <> ''`)
 		if err != nil {
 			return err
@@ -335,6 +340,13 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 			}
 		}
 		return nil
+	},
+	// 7: explicit repository ownership on cards so manual cards without GitHub
+	// links stay scoped to the repository board where they were created.
+	6: func(ctx context.Context, tx *sql.Tx) error {
+		return addColumns(ctx, tx, []columnDef{
+			{"cards", "repo", "TEXT NOT NULL DEFAULT ''"},
+		})
 	},
 }
 

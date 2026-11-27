@@ -211,3 +211,33 @@ func TestImportAndConversationFromLocalHistory(t *testing.T) {
 		t.Fatalf("unexpected conversation: %+v", conv)
 	}
 }
+
+func TestResolveWorkspaceAcceptsDynamicDirectory(t *testing.T) {
+	defaultDir := filepath.Join(t.TempDir(), "volcano")
+	dynamicDir := filepath.Join(t.TempDir(), "kubernetes")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dynamicDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := New(Config{
+		DataDir:    t.TempDir(),
+		HomeDir:    t.TempDir(),
+		Workspaces: []string{defaultDir},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer mgr.Close()
+
+	id, cwd := mgr.resolveWorkspace(dynamicDir)
+	if id != "kubernetes" || cwd != dynamicDir {
+		t.Fatalf("resolveWorkspace(dynamicDir) = (%q, %q), want (kubernetes, %q)", id, cwd, dynamicDir)
+	}
+	fallbackID, fallbackCWD := mgr.resolveWorkspace(filepath.Join(t.TempDir(), "does-not-exist"))
+	if fallbackID != "volcano" || fallbackCWD != defaultDir {
+		t.Fatalf("resolveWorkspace(missing) = (%q, %q), want (volcano, %q)", fallbackID, fallbackCWD, defaultDir)
+	}
+}
+

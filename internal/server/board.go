@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,7 +23,15 @@ const (
 	settingGitHubUser       = "github_user"
 	settingDefaultRepo      = "default_repo"
 	settingApprovalMode     = "approval_mode"
+	settingRepos            = "repos"
 )
+
+// RepoConfig represents a GitHub repository tracked as its own board view,
+// with an optional local checkout directory for Codex / Copilot sessions.
+type RepoConfig struct {
+	Repo          string `json:"repo"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+}
 
 // ValidApprovalMode reports whether mode is an AO approval mode accepted on
 // spawn and conversation settings, or empty for AO's default.
@@ -64,9 +75,10 @@ type boardSettings struct {
 	DefaultRepo      string `json:"defaultRepo"`
 	// GitHubUser is the explicit user override stored in settings, or ""
 	// when the board uses the auto-detected gh login (or --gh-user).
-	GitHubUser   string `json:"githubUser"`
-	DetectedUser string `json:"detectedUser"`
-	ApprovalMode string `json:"approvalMode"`
+	GitHubUser   string       `json:"githubUser"`
+	DetectedUser string       `json:"detectedUser"`
+	ApprovalMode string       `json:"approvalMode"`
+	Repos        []RepoConfig `json:"repos"`
 }
 
 type boardView struct {
@@ -188,6 +200,158 @@ func (s *Server) approvalMode(ctx context.Context) string {
 	return s.cfg.ApprovalMode
 }
 
+func normalizeWorkspacePath(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return "", nil
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve home directory for %q", raw)
+		}
+		if p == "~" {
+			p = home
+		} else {
+			p = filepath.Join(home, p[2:])
+		}
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("workspace path %q must be an absolute path", raw)
+	}
+	clean := filepath.Clean(p)
+	info, err := os.Stat(clean)
+	if err != nil {
+		return "", fmt.Errorf("workspace path %q does not exist", clean)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace path %q is not a directory", clean)
+	}
+	return clean, nil
+}
+
+func (s *Server) defaultWorkspaceForRepo(repo string) string {
+	s.mu.RLock()
+	projects := append([]ao.Project{}, s.projects...)
+	s.mu.RUnlock()
+	if len(projects) == 0 {
+		return ""
+	}
+	_, name, _ := strings.Cut(repo, "/")
+	for _, p := range projects {
+		if p.Path != "" && name != "" && strings.EqualFold(filepath.Base(p.Path), name) {
+			return p.Path
+		}
+	}
+	if len(projects) == 1 && projects[0].Path != "" {
+		return projects[0].Path
+	}
+	return ""
+}
+
+func (s *Server) configuredRepos(ctx context.Context) []RepoConfig {
+	defRepo := s.defaultRepo(ctx)
+	var stored []RepoConfig
+	if raw, err := s.store.GetSetting(ctx, settingRepos, ""); err == nil && strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &stored)
+	}
+	out := make([]RepoConfig, 0, len(stored)+1)
+	seen := map[string]bool{}
+	for _, item := range stored {
+		norm, err := github.NormalizeRepo(item.Repo)
+		if err != nil {
+			continue
+		}
+		key := strings.ToLower(norm)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, RepoConfig{
+			Repo:          norm,
+			WorkspacePath: strings.TrimSpace(item.WorkspacePath),
+		})
+	}
+	if defRepo != "" && !seen[strings.ToLower(defRepo)] {
+		entry := RepoConfig{
+			Repo:          defRepo,
+			WorkspacePath: s.defaultWorkspaceForRepo(defRepo),
+		}
+		out = append([]RepoConfig{entry}, out...)
+	}
+	return out
+}
+
+func (s *Server) repoWorkspacePath(ctx context.Context, repo string) string {
+	if strings.TrimSpace(repo) == "" {
+		return ""
+	}
+	want := strings.ToLower(strings.TrimSpace(repo))
+	for _, r := range s.configuredRepos(ctx) {
+		if strings.ToLower(r.Repo) == want && r.WorkspacePath != "" {
+			return r.WorkspacePath
+		}
+	}
+	return ""
+}
+
+func (s *Server) repoForCWD(ctx context.Context, cwd string) string {
+	if strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	clean := filepath.Clean(cwd)
+	bestRepo := ""
+	bestLen := 0
+	for _, r := range s.configuredRepos(ctx) {
+		if r.WorkspacePath == "" {
+			continue
+		}
+		root := filepath.Clean(r.WorkspacePath)
+		if (clean == root || strings.HasPrefix(clean, root+string(filepath.Separator))) && len(root) > bestLen {
+			bestLen = len(root)
+			bestRepo = r.Repo
+		}
+	}
+	return bestRepo
+}
+
+func (s *Server) allProjects(ctx context.Context) []ao.Project {
+	s.mu.RLock()
+	base := append([]ao.Project{}, s.projects...)
+	s.mu.RUnlock()
+	seenPath := map[string]bool{}
+	for _, p := range base {
+		if p.Path != "" {
+			seenPath[filepath.Clean(p.Path)] = true
+		}
+	}
+	for _, r := range s.configuredRepos(ctx) {
+		if r.WorkspacePath == "" {
+			continue
+		}
+		clean := filepath.Clean(r.WorkspacePath)
+		if seenPath[clean] {
+			continue
+		}
+		if info, err := os.Stat(clean); err != nil || !info.IsDir() {
+			continue
+		}
+		seenPath[clean] = true
+		name := filepath.Base(clean)
+		if name == "" || name == "." || name == string(filepath.Separator) {
+			name = r.Repo
+		}
+		base = append(base, ao.Project{
+			ID:            clean,
+			Name:          name,
+			Path:          clean,
+			Kind:          "git",
+			SessionPrefix: name,
+		})
+	}
+	return base
+}
+
 func (s *Server) boardSettings(ctx context.Context) boardSettings {
 	s.mu.RLock()
 	override := s.ghUserOverride
@@ -198,6 +362,7 @@ func (s *Server) boardSettings(ctx context.Context) boardSettings {
 		GitHubUser:       override,
 		DetectedUser:     s.detectedGitHubUser(),
 		ApprovalMode:     s.approvalMode(ctx),
+		Repos:            s.configuredRepos(ctx),
 	}
 }
 
@@ -241,13 +406,14 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 		out.Cards = append(out.Cards, s.view(c))
 	}
 	defaultProject := s.defaultProject()
+	projects := s.allProjects(ctx)
 	s.mu.RLock()
 	out.AO = aoStatus{
 		Connected:      s.aoConnected,
 		URL:            s.cfg.AOURL,
 		Error:          s.aoError,
 		LastSyncAt:     formatTime(s.aoLastSync),
-		Projects:       append([]ao.Project{}, s.projects...),
+		Projects:       projects,
 		DefaultProject: defaultProject,
 	}
 	out.GitHub = githubStatus{
@@ -263,20 +429,51 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
-		ShowOrchestrator *bool   `json:"showOrchestrator"`
-		DefaultRepo      *string `json:"defaultRepo"`
-		GitHubUser       *string `json:"githubUser"`
-		ApprovalMode     *string `json:"approvalMode"`
+		ShowOrchestrator *bool         `json:"showOrchestrator"`
+		DefaultRepo      *string       `json:"defaultRepo"`
+		GitHubUser       *string       `json:"githubUser"`
+		ApprovalMode     *string       `json:"approvalMode"`
+		Repos            *[]RepoConfig `json:"repos"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
 	var defaultRepo, ghUser, approvalMode string
+	var normalizedRepos []RepoConfig
 	if req.DefaultRepo != nil {
-		defaultRepo = strings.TrimSpace(*req.DefaultRepo)
-		if defaultRepo != "" && !github.ValidRepo(defaultRepo) {
-			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Default repository must be owner/name (or empty for the server default).")
-			return
+		raw := strings.TrimSpace(*req.DefaultRepo)
+		if raw != "" {
+			norm, err := github.NormalizeRepo(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Default repository must be owner/name or a GitHub URL (or empty for the server default).")
+				return
+			}
+			defaultRepo = norm
+		}
+	}
+	if req.Repos != nil {
+		seen := map[string]bool{}
+		normalizedRepos = make([]RepoConfig, 0, len(*req.Repos))
+		for _, item := range *req.Repos {
+			normRepo, err := github.NormalizeRepo(item.Repo)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_INPUT", fmt.Sprintf("Invalid repository %q: expected owner/name or GitHub URL.", item.Repo))
+				return
+			}
+			key := strings.ToLower(normRepo)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			wsPath, err := normalizeWorkspacePath(item.WorkspacePath)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_INPUT", err.Error()+".")
+				return
+			}
+			normalizedRepos = append(normalizedRepos, RepoConfig{
+				Repo:          normRepo,
+				WorkspacePath: wsPath,
+			})
 		}
 	}
 	if req.GitHubUser != nil {
@@ -305,6 +502,18 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DefaultRepo != nil {
 		if err := s.store.SetSetting(ctx, settingDefaultRepo, defaultRepo); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		changed = true
+	}
+	if req.Repos != nil {
+		encoded, err := json.Marshal(normalizedRepos)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if err := s.store.SetSetting(ctx, settingRepos, string(encoded)); err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
@@ -494,6 +703,7 @@ type createCardRequest struct {
 	Title       string        `json:"title"`
 	Category    string        `json:"category"`
 	ColumnID    string        `json:"columnId"`
+	Repo        string        `json:"repo"`
 	Tags        []string      `json:"tags"`
 	Notes       string        `json:"notes"`
 	Summary     string        `json:"summary"`
@@ -519,8 +729,21 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
+	req.Repo = strings.TrimSpace(req.Repo)
 	req.GitHubRef = strings.TrimSpace(req.GitHubRef)
 	req.AOSessionID = strings.TrimSpace(req.AOSessionID)
+	if req.Repo != "" {
+		norm, err := github.NormalizeRepo(req.Repo)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Repository must be owner/name or a GitHub URL.")
+			return
+		}
+		req.Repo = norm
+	}
+	parseDefaultRepo := s.defaultRepo(ctx)
+	if req.Repo != "" {
+		parseDefaultRepo = req.Repo
+	}
 	if req.Category != "" && !db.ValidCategory(req.Category) {
 		writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Unknown category.")
 		return
@@ -562,7 +785,7 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 	var refs []github.Ref
 	var items []*github.Item
 	if req.GitHubRef != "" {
-		parsed, err := github.ParseRefs(req.GitHubRef, s.defaultRepo(ctx))
+		parsed, err := github.ParseRefs(req.GitHubRef, parseDefaultRepo)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_GITHUB_REF", "Unrecognized GitHub reference. Use #123, owner/repo#123 or a pull request or issue URL.")
 			return
@@ -637,6 +860,10 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 			category = InferCategory(req.Title)
 		}
 	}
+	cardRepo := req.Repo
+	if cardRepo == "" && len(refs) > 0 {
+		cardRepo = refs[0].Repo
+	}
 	card := &db.Card{
 		Title:       req.Title,
 		ColumnID:    columnID,
@@ -647,6 +874,7 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		AutoMove:    req.AutoMove == nil || *req.AutoMove,
 		AOSessionID: req.AOSessionID,
 		Origin:      db.OriginManual,
+		Repo:        cardRepo,
 	}
 	if card.Summary != "" {
 		card.SummarySource = db.SummaryManual
@@ -691,6 +919,7 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 type patchCardRequest struct {
 	Title       *string   `json:"title"`
 	Category    *string   `json:"category"`
+	Repo        *string   `json:"repo"`
 	Tags        *[]string `json:"tags"`
 	Summary     *string   `json:"summary"`
 	Notes       *string   `json:"notes"`
@@ -710,6 +939,19 @@ func (s *Server) handlePatchCard(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	if req.Repo != nil {
+		raw := strings.TrimSpace(*req.Repo)
+		if raw != "" {
+			norm, err := github.NormalizeRepo(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_INPUT", "Repository must be owner/name or a GitHub URL.")
+				return
+			}
+			req.Repo = &norm
+		} else {
+			req.Repo = &raw
+		}
 	}
 	if req.ColumnID != nil {
 		if _, ok := cols.byID[*req.ColumnID]; !ok {
@@ -739,6 +981,9 @@ func (s *Server) handlePatchCard(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Category != nil {
 			c.Category = *req.Category
+		}
+		if req.Repo != nil {
+			c.Repo = *req.Repo
 		}
 		if req.Tags != nil {
 			c.Tags = *req.Tags

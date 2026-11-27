@@ -455,9 +455,222 @@ a:hover {
   flex: none;
 }
 
+.repo-switcher {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.repo-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  max-width: 260px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.repo-trigger:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
+}
+
+.repo-trigger.is-scoped {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-subtle);
+}
+
 .repo-context {
-  color: var(--text-muted);
+  color: var(--text);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repo-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning);
+  flex: none;
+}
+
+.repo-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 320px;
+  max-width: 420px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.repo-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.repo-menu-item:hover {
+  background: var(--hover);
+}
+
+.repo-menu-item.is-active {
+  background: var(--accent-subtle);
+}
+
+.repo-menu-check {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  flex: none;
+}
+
+.repo-menu-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.repo-menu-label {
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repo-menu-sub {
+  color: var(--text-subtle);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repo-menu-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.repo-menu-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.repo-menu-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.repo-menu-badge.is-unread {
+  background: var(--warning-subtle);
+  color: var(--warning);
+}
+
+.repo-menu-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.repo-menu-edit:hover {
+  opacity: 1;
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--raised);
+}
+
+.repo-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
+.repo-menu-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.repo-menu-action:hover {
+  background: var(--hover);
+}
+
+.repo-menu-action.is-muted {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.settings-repos {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-repo-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(200px, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-repo-actions {
+  display: flex;
+  justify-content: flex-start;
+  padding-top: 2px;
 }
 
 /* Buttons */
@@ -4116,9 +4329,8 @@ button.id-chip:hover {
     padding: 0;
   }
 
-  .repo-context,
-  .repo-context + .topbar-sep {
-    display: none;
+  .repo-trigger {
+    max-width: 180px;
   }
 }
 

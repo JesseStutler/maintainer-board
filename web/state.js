@@ -54,7 +54,7 @@ const FILTER_KEY = 'mb.filters';
 const COLLAPSED_COLS_KEY = 'mb.collapsedCols';
 const COMPACT_COLS_KEY = 'mb.compactCols';
 const PINNED_CARDS_KEY = 'mb.pinnedCards';
-const DEFAULT_FILTERS = { search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true, compact: false, sort: 'manual' };
+const DEFAULT_FILTERS = { repo: '', search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true, compact: false, sort: 'manual' };
 
 /** Value of the author filter that selects the maintainer's own items. */
 export const AUTHOR_MINE = '@me';
@@ -195,11 +195,138 @@ export function cardLinks(card) {
   ];
 }
 
-/** "#6247" for the default repository, "owner/repo#12" otherwise. */
+/** Configured repositories from board settings (always includes defaultRepo). */
+export function configuredRepos() {
+  const settings = state.board && state.board.settings;
+  if (!settings) return [];
+  const list = Array.isArray(settings.repos) ? settings.repos.filter((r) => r && r.repo) : [];
+  if (list.length > 0) return list;
+  return settings.defaultRepo ? [{ repo: settings.defaultRepo, workspacePath: '' }] : [];
+}
+
+/** Active repository context: the selected repo board, or defaultRepo in All view. */
+export function activeRepo() {
+  if (state.filters.repo) return state.filters.repo;
+  return (state.board && state.board.settings && state.board.settings.defaultRepo) || '';
+}
+
+function normalizeDirPath(p) {
+  return String(p || '').replace(/\/+$/, '');
+}
+
+function repoForCWD(cwd) {
+  const clean = normalizeDirPath(cwd);
+  if (!clean) return '';
+  let bestRepo = '';
+  let bestLen = 0;
+  for (const item of configuredRepos()) {
+    const root = normalizeDirPath(item.workspacePath);
+    if (!root) continue;
+    if ((clean === root || clean.startsWith(`${root}/`)) && root.length > bestLen) {
+      bestLen = root.length;
+      bestRepo = item.repo;
+    }
+  }
+  return bestRepo;
+}
+
+/**
+ * Repositories a card belongs to: every linked GitHub repo plus its explicit
+ * board repo. Legacy cards with neither fall back to matching their session
+ * workspace path or the board's defaultRepo.
+ */
+export function cardRepos(card) {
+  if (!card) return [];
+  const seen = new Map();
+  const add = (repo) => {
+    const clean = String(repo || '').trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) seen.set(key, clean);
+  };
+  for (const link of cardLinks(card)) add(link.repo);
+  if (card.repo) add(card.repo);
+  if (seen.size === 0) {
+    const fromCwd = card.session && card.session.cwd ? repoForCWD(card.session.cwd) : '';
+    if (fromCwd) add(fromCwd);
+    else if (state.board && state.board.settings && state.board.settings.defaultRepo) {
+      add(state.board.settings.defaultRepo);
+    }
+  }
+  return Array.from(seen.values());
+}
+
+/** Primary repository of a card (first linked repo, explicit card.repo, or fallback). */
+export function cardPrimaryRepo(card) {
+  return cardRepos(card)[0] || '';
+}
+
+export function cardBelongsToRepo(card, repo) {
+  if (!repo) return true;
+  const want = repo.toLowerCase();
+  return cardRepos(card).some((r) => r.toLowerCase() === want);
+}
+
+/**
+ * Preferred project/workspace ID for spawning an agent in `repo`. Returns a
+ * configured workspacePath or matching AO project ID, or ''.
+ */
+export function workspaceForRepo(repo) {
+  if (!repo || !state.board) return '';
+  const want = repo.toLowerCase();
+  const entry = configuredRepos().find((r) => r.repo.toLowerCase() === want);
+  const projects = (state.board.ao && state.board.ao.projects) || [];
+  if (entry && entry.workspacePath) {
+    const clean = normalizeDirPath(entry.workspacePath);
+    const match = projects.find((p) => normalizeDirPath(p.path) === clean || p.id === entry.workspacePath);
+    return match ? match.id : entry.workspacePath;
+  }
+  const shortName = repo.includes('/') ? repo.split('/')[1].toLowerCase() : want;
+  const byName = projects.find((p) => (p.name || '').toLowerCase() === shortName || (p.id || '').toLowerCase() === shortName);
+  return byName ? byName.id : '';
+}
+
+/** Summary of all repositories for the top-left switcher dropdown. */
+export function boardRepoSummary() {
+  const visible = cards().filter((c) => !hiddenOrchestrator(c));
+  const map = new Map();
+  const ensure = (repo, meta = {}) => {
+    const key = repo.toLowerCase();
+    let item = map.get(key);
+    if (!item) {
+      item = { repo, workspacePath: meta.workspacePath || '', configured: Boolean(meta.configured), count: 0, unread: 0 };
+      map.set(key, item);
+    } else if (meta.configured) {
+      item.configured = true;
+      item.repo = repo;
+      if (meta.workspacePath) item.workspacePath = meta.workspacePath;
+    }
+    return item;
+  };
+  for (const r of configuredRepos()) {
+    ensure(r.repo, { workspacePath: r.workspacePath || '', configured: true });
+  }
+  let totalUnread = 0;
+  for (const card of visible) {
+    if (card.hasUnreadUpdates) totalUnread += 1;
+    for (const r of cardRepos(card)) {
+      const item = ensure(r);
+      item.count += 1;
+      if (card.hasUnreadUpdates) item.unread += 1;
+    }
+  }
+  return {
+    totalCount: visible.length,
+    totalUnread,
+    repos: Array.from(map.values()),
+  };
+}
+
+/** "#6247" for the active/default repository, "owner/repo#12" otherwise. */
 export function linkRefLabel(link) {
   if (!link || !link.number) return '';
-  const defaultRepo = state.board ? state.board.settings.defaultRepo : '';
-  return link.repo && link.repo !== defaultRepo ? `${link.repo}#${link.number}` : `#${link.number}`;
+  const refRepo = activeRepo();
+  return link.repo && refRepo && link.repo.toLowerCase() !== refRepo.toLowerCase() ? `${link.repo}#${link.number}` : `#${link.number}`;
 }
 
 export function ghRefLabel(card) {
@@ -374,8 +501,10 @@ export function showCardReviewDecision(card, mine) {
 /** Distinct authors of the linked items on the board, sorted by name. */
 export function cardAuthors() {
   const seen = new Map();
+  const repo = state.filters.repo;
   for (const card of cards()) {
     if (hiddenOrchestrator(card)) continue;
+    if (repo && !cardBelongsToRepo(card, repo)) continue;
     for (const link of cardLinks(card)) {
       if (!link.author) continue;
       const key = link.author.toLowerCase();
@@ -497,6 +626,7 @@ export function searchMatches(card) {
 export function matchesFilters(card) {
   const f = state.filters;
   if (hiddenOrchestrator(card)) return false;
+  if (f.repo && !cardBelongsToRepo(card, f.repo)) return false;
   if (f.category && card.category !== f.category) return false;
   if (f.agent && (!card.session || card.session.harness !== f.agent)) return false;
   if (!matchesAuthor(card, f.author)) return false;
@@ -630,5 +760,12 @@ export function sortColumnCards(list, { sort = state.filters.sort, pinned = stat
 }
 
 export function unreadCount() {
-  return cards().filter((c) => c.hasUnreadUpdates && !hiddenOrchestrator(c)).length;
+  const repo = state.filters.repo;
+  return cards().filter((c) => c.hasUnreadUpdates && !hiddenOrchestrator(c) && (!repo || cardBelongsToRepo(c, repo))).length;
+}
+
+export function otherReposUnreadCount() {
+  const repo = state.filters.repo;
+  if (!repo) return 0;
+  return cards().filter((c) => c.hasUnreadUpdates && !hiddenOrchestrator(c) && !cardBelongsToRepo(c, repo)).length;
 }

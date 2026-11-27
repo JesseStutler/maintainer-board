@@ -4,7 +4,25 @@ import { h, relTime, plural, debounce, copyText } from './util.js';
 import { icon, brandIcon } from './icons.js';
 import { api, importHistory } from './api.js';
 import { openModal, confirmDialog, toast, toastError, withBusy, segmented, select, spinner, statusStrip } from './ui.js';
-import { state, subscribe, emit, CATEGORIES, ROLES, COLOR_PRESETS, APPROVAL_MODES, approvalModeLabel, approvalModeShort, columns, cards, columnByRole, harnessLabel } from './state.js';
+import {
+  state,
+  subscribe,
+  emit,
+  setFilter,
+  CATEGORIES,
+  ROLES,
+  COLOR_PRESETS,
+  APPROVAL_MODES,
+  approvalModeLabel,
+  approvalModeShort,
+  columns,
+  cards,
+  columnByRole,
+  harnessLabel,
+  activeRepo,
+  configuredRepos,
+  workspaceForRepo,
+} from './state.js';
 import { createModelPicker } from './models.js';
 
 let fieldSeq = 0;
@@ -30,6 +48,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
     return;
   }
 
+  const targetRepo = activeRepo();
   const title = h('input', { class: 'input', type: 'text', maxlength: '300', placeholder: 'What needs to be done', 'data-autofocus': true });
   const ghRef = h('input', { class: 'input mono', type: 'text', spellcheck: 'false', placeholder: '#6247 #6196, owner/repo#123 or URLs' });
   const category = select([['', 'Auto-detect'], ...CATEGORIES], '');
@@ -37,12 +56,13 @@ export function openNewTask({ columnId, onCreated } = {}) {
   const tags = h('input', { class: 'input', type: 'text', placeholder: 'scheduler, sig-scheduling' });
   const prompt = h('textarea', { class: 'textarea', spellcheck: 'false', placeholder: 'Initial prompt for the agent (optional)' });
   const projects = board.ao.projects || [];
-  const project = projects.length > 1 ? select(projects.map((p) => [p.id, p.name || p.id]), board.ao.defaultProject) : null;
+  const preferredProject = workspaceForRepo(targetRepo) || board.ao.defaultProject;
+  const project = projects.length > 1 ? select(projects.map((p) => [p.id, p.name || p.id]), preferredProject) : null;
   const existing = h('select', { class: 'select' });
   const error = h('div', { class: 'field-error', role: 'alert', hidden: true });
 
   const promptField = field('Initial prompt', prompt, { full: true });
-  const projectField = project ? field('AO project', project) : null;
+  const projectField = project ? field('Workspace directory', project) : null;
   // Model and effort of the new session, loaded for the chosen agent.
   const picker = createModelPicker({
     onChange: () => {
@@ -109,7 +129,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
     'div',
     { class: 'form-grid' },
     field('Title', title, { full: true, hint: 'Leave empty to use the title of the linked pull request or issue.' }),
-    field('GitHub pull request or issue', ghRef, { hint: `Bare numbers resolve to ${board.settings.defaultRepo}. Separate multiple refs with spaces or commas.` }),
+    field('GitHub pull request or issue', ghRef, { hint: `Bare numbers resolve to ${targetRepo}. Separate multiple refs with spaces or commas.` }),
     field('Tags', tags, { hint: 'Comma-separated.' }),
     field('Category', category),
     field('Column', column),
@@ -130,6 +150,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
     error.hidden = true;
     const payload = {
       title: title.value.trim(),
+      repo: targetRepo,
       githubRef: ghRef.value.trim(),
       category: category.value,
       columnId: column.value,
@@ -142,7 +163,7 @@ export function openNewTask({ columnId, onCreated } = {}) {
       return;
     }
     if (agent.value === 'copilot' || agent.value === 'codex') {
-      payload.agent = { harness: agent.value, prompt: prompt.value, projectId: project ? project.value : '', approvalMode: approval.value, ...picker.value() };
+      payload.agent = { harness: agent.value, prompt: prompt.value, projectId: project ? project.value : preferredProject, approvalMode: approval.value, ...picker.value() };
     } else if (agent.value === 'existing') {
       if (!existing.value) {
         error.textContent = 'There is no unlinked AO session to attach. Choose another agent option.';
@@ -719,6 +740,7 @@ export function openImport({ onImported, onOpenCard } = {}) {
     render();
   });
 
+  let scopeInitialized = false;
   async function load() {
     view.error = null;
     render();
@@ -728,6 +750,20 @@ export function openImport({ onImported, onOpenCard } = {}) {
       const scopes = new Map();
       for (const c of view.candidates) scopes.set(scopeOf(c), c.projectId ? `Project: ${c.projectId}` : c.folder ? `Folder: ${c.folder}` : 'No project');
       scope.replaceChildren(h('option', { value: '' }, 'All projects and folders'), ...Array.from(scopes, ([value, label]) => h('option', { value }, label)));
+      if (!scopeInitialized && state.filters.repo) {
+        scopeInitialized = true;
+        const active = state.filters.repo.toLowerCase();
+        const repoEntry = configuredRepos().find((r) => r.repo.toLowerCase() === active);
+        const wsBase = repoEntry && repoEntry.workspacePath ? repoEntry.workspacePath.replace(/\/+$/, '').split('/').pop().toLowerCase() : '';
+        const repoShort = active.includes('/') ? active.split('/')[1] : active;
+        for (const [val] of scopes) {
+          const low = val.toLowerCase();
+          if ((wsBase && (low === `p:${wsBase}` || low === `f:${wsBase}`)) || low === `p:${repoShort}` || low === `f:${repoShort}`) {
+            view.scope = val;
+            break;
+          }
+        }
+      }
       scope.value = scopes.has(view.scope) ? view.scope : '';
       view.scope = scope.value;
       for (const id of Array.from(view.selected)) {
@@ -803,6 +839,107 @@ export function openImport({ onImported, onOpenCard } = {}) {
   load();
 }
 
+// Add / edit repository board
+
+export function openAddRepo({ initialRepo = '', initialPath = '', onAdded } = {}) {
+  const board = state.board;
+  if (!board) return;
+  const editing = Boolean(initialRepo);
+
+  const repoInput = h('input', {
+    class: 'input mono',
+    type: 'text',
+    spellcheck: 'false',
+    value: initialRepo,
+    placeholder: 'kubernetes/kubernetes or https://github.com/owner/repo',
+    'data-autofocus': !editing,
+  });
+  const wsInput = h('input', {
+    class: 'input mono',
+    type: 'text',
+    spellcheck: 'false',
+    value: initialPath,
+    placeholder: '/path/to/local/checkout (optional)',
+    'data-autofocus': editing,
+  });
+  const error = h('div', { class: 'field-error', role: 'alert', hidden: true });
+
+  const body = h(
+    'div',
+    { class: 'form-grid' },
+    field('GitHub repository', repoInput, {
+      full: true,
+      hint: 'Enter owner/name or paste any GitHub repository, PR, or issue URL.',
+    }),
+    field('Local workspace path (optional)', wsInput, {
+      full: true,
+      hint: 'Directory where Codex and Copilot sessions start when working in this repository board. Takes effect immediately without restarting.',
+    }),
+    h('div', { class: 'field full' }, error),
+  );
+
+  const save = h('button', { class: 'btn btn-primary', type: 'button' }, icon(editing ? 'check' : 'plus', 13), h('span', null, editing ? 'Save Repository' : 'Add Repository'));
+  const cancel = h('button', { class: 'btn', type: 'button' }, 'Cancel');
+  const modal = openModal({
+    title: editing ? `Configure ${initialRepo}` : 'Add Repository Board',
+    body,
+    foot: [h('span', { class: 'spacer' }), cancel, save],
+  });
+  cancel.addEventListener('click', () => modal.close());
+
+  const submit = () => {
+    error.hidden = true;
+    const rawRepo = repoInput.value.trim();
+    if (!rawRepo) {
+      error.textContent = 'Enter a GitHub repository (owner/name or URL).';
+      error.hidden = false;
+      repoInput.focus();
+      return;
+    }
+    const existing = configuredRepos().map((r) => ({ repo: r.repo, workspacePath: r.workspacePath || '' }));
+    const nextEntry = { repo: rawRepo, workspacePath: wsInput.value.trim() };
+    let replaced = false;
+    const matchTarget = (initialRepo || rawRepo).toLowerCase();
+    const nextRepos = existing.map((item) => {
+      if (item.repo.toLowerCase() === matchTarget) {
+        replaced = true;
+        return nextEntry;
+      }
+      return item;
+    });
+    if (!replaced) nextRepos.push(nextEntry);
+
+    withBusy(
+      save,
+      async () => {
+        const updated = await api.patch('/api/settings', { repos: nextRepos });
+        if (state.board) state.board.settings = updated;
+        // Find the canonical normalized name returned by the server.
+        const added = (updated.repos || []).find(
+          (r) => r.repo.toLowerCase() === rawRepo.toLowerCase() || rawRepo.toLowerCase().includes(r.repo.toLowerCase()),
+        ) || (updated.repos || [])[(updated.repos || []).length - 1];
+        const target = added ? added.repo : rawRepo;
+        setFilter('repo', target);
+        modal.close();
+        toast(editing ? `Updated ${target}.` : `Added ${target} board.`, 'success');
+        if (onAdded) onAdded(target);
+      },
+      (err) => {
+        error.textContent = err.message;
+        error.hidden = false;
+        return true;
+      },
+    );
+  };
+  save.addEventListener('click', submit);
+  modal.el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || e.target.tagName === 'INPUT')) {
+      e.preventDefault();
+      submit();
+    }
+  });
+}
+
 // Settings
 
 export function openSettings({ onSaved } = {}) {
@@ -830,6 +967,68 @@ export function openSettings({ onSaved } = {}) {
   showOrch.checked = Boolean(s.showOrchestrator);
   const error = h('div', { class: 'field-error', role: 'alert', hidden: true });
 
+  // Editable repository boards list.
+  const repoDrafts = configuredRepos().map((r) => ({ repo: r.repo, workspacePath: r.workspacePath || '' }));
+  const repoListEl = h('div', { class: 'settings-repos' });
+  const renderRepos = () => {
+    const rows = repoDrafts.map((entry, idx) => {
+      const rIn = h('input', {
+        class: 'input input-sm mono',
+        type: 'text',
+        spellcheck: 'false',
+        value: entry.repo,
+        placeholder: 'owner/repo',
+        'aria-label': 'Repository',
+      });
+      rIn.addEventListener('input', () => {
+        entry.repo = rIn.value;
+      });
+      const wIn = h('input', {
+        class: 'input input-sm mono',
+        type: 'text',
+        spellcheck: 'false',
+        value: entry.workspacePath,
+        placeholder: '/path/to/local/repo (optional)',
+        'aria-label': 'Local workspace path',
+      });
+      wIn.addEventListener('input', () => {
+        entry.workspacePath = wIn.value;
+      });
+      const del = h(
+        'button',
+        {
+          class: 'btn btn-sm btn-icon btn-ghost',
+          type: 'button',
+          title: 'Remove repository',
+          'aria-label': 'Remove repository',
+          onClick: () => {
+            repoDrafts.splice(idx, 1);
+            renderRepos();
+          },
+        },
+        icon('trash', 13),
+      );
+      return h('div', { class: 'settings-repo-row' }, rIn, wIn, del);
+    });
+    const addBtn = h(
+      'button',
+      {
+        class: 'btn btn-sm',
+        type: 'button',
+        onClick: () => {
+          repoDrafts.push({ repo: '', workspacePath: '' });
+          renderRepos();
+          const inputs = repoListEl.querySelectorAll('.settings-repo-row input');
+          if (inputs.length >= 2) inputs[inputs.length - 2].focus();
+        },
+      },
+      icon('plus', 13),
+      h('span', null, 'Add Repository'),
+    );
+    repoListEl.replaceChildren(...rows, h('div', { class: 'settings-repo-actions' }, addBtn));
+  };
+  renderRepos();
+
   const ghHint = s.detectedUser
     ? `Used for MINE badges, own-PR tracking, and personal reviews. Leave blank to use the auto-detected login (@${s.detectedUser}).`
     : 'Used for MINE badges, own-PR tracking, and personal reviews. Leave blank to auto-detect from gh CLI.';
@@ -838,7 +1037,14 @@ export function openSettings({ onSaved } = {}) {
     'div',
     { class: 'form-grid' },
     field('GitHub username', ghUser, { full: true, hint: ghHint }),
-    field('Default repository', defaultRepo, { full: true, hint: 'Repository used for bare #123 references (owner/name).' }),
+    field('Default repository', defaultRepo, { full: true, hint: 'Fallback repository for bare #123 references in All Repos view (owner/name).' }),
+    h(
+      'div',
+      { class: 'field full' },
+      h('span', { class: 'label' }, 'Repository boards & local workspaces'),
+      repoListEl,
+      h('span', { class: 'hint' }, 'Switch between these repositories from the top-left menu. Binding a local checkout path auto-selects it for new Codex and Copilot sessions.'),
+    ),
     field('Default agent permissions', approval, {
       full: true,
       hint: 'Applied to newly spawned Copilot and Codex sessions. Bypass permissions (YOLO) skips interactive tool approval prompts, matching local --yolo mode.',
@@ -861,6 +1067,7 @@ export function openSettings({ onSaved } = {}) {
   const cancel = h('button', { class: 'btn', type: 'button' }, 'Cancel');
   const modal = openModal({
     title: 'Board Settings',
+    size: 'wide',
     body,
     foot: [h('span', { class: 'hint' }, 'Stored locally in board.db'), h('span', { class: 'spacer' }), cancel, save],
   });
@@ -870,11 +1077,15 @@ export function openSettings({ onSaved } = {}) {
     error.hidden = true;
     const prevUser = (s.githubUser || '').toLowerCase();
     const nextUser = ghUser.value.trim().replace(/^@/, '');
+    const cleanRepos = repoDrafts
+      .map((r) => ({ repo: r.repo.trim(), workspacePath: r.workspacePath.trim() }))
+      .filter((r) => r.repo !== '');
     const payload = {
       githubUser: nextUser,
       defaultRepo: defaultRepo.value.trim(),
       approvalMode: approval.value,
       showOrchestrator: showOrch.checked,
+      repos: cleanRepos,
     };
     withBusy(
       save,

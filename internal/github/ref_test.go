@@ -108,3 +108,36 @@ func TestParseRefsAndFindRefs(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRepo(t *testing.T) {
+	valid := []struct {
+		in   string
+		want string
+	}{
+		{"kubernetes/kubernetes", "kubernetes/kubernetes"},
+		{"  JesseStutler/kubernetes  ", "JesseStutler/kubernetes"},
+		{"https://github.com/kubernetes/kubernetes", "kubernetes/kubernetes"},
+		{"https://github.com/kubernetes/kubernetes.git", "kubernetes/kubernetes"},
+		{"https://github.com/JesseStutler/kubernetes/issues/1", "JesseStutler/kubernetes"},
+		{"https://github.com/volcano-sh/volcano/pull/6247/files", "volcano-sh/volcano"},
+		{"github.com/my-org/repo_1.go/", "my-org/repo_1.go"},
+	}
+	for _, tc := range valid {
+		got, err := NormalizeRepo(tc.in)
+		if err != nil {
+			t.Errorf("NormalizeRepo(%q) error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("NormalizeRepo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	invalid := []string{"", "   ", "kubernetes", "https://gitlab.com/a/b", "https://github.com/only-owner", "-bad/repo", "a/.."}
+	for _, in := range invalid {
+		if got, err := NormalizeRepo(in); err == nil {
+			t.Errorf("NormalizeRepo(%q) = %q, want error", in, got)
+		}
+	}
+}
+

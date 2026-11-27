@@ -19,6 +19,12 @@ import {
   isColumnCompact,
   toggleColumnCompact,
   toggleGlobalCompact,
+  cardRepos,
+  cardBelongsToRepo,
+  boardRepoSummary,
+  otherReposUnreadCount,
+  unreadCount,
+  workspaceForRepo,
   AUTHOR_MINE,
 } from '../state.js';
 
@@ -35,9 +41,9 @@ function pr(overrides = {}) {
   return card({ ghNumber: 6247, ghRepo: 'volcano-sh/volcano', ghKind: 'pr', ghAuthor: 'mohitvinchoo', ghState: 'OPEN', ghLastSyncedAt: '2026-11-25T01:00:00Z', ...overrides });
 }
 
-function setBoard(cards, { currentUser = 'JesseStutler' } = {}) {
-  state.board = { currentUser, cards, columns: [], settings: { showOrchestrator: false, defaultRepo: 'volcano-sh/volcano' } };
-  state.filters = { search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true };
+function setBoard(cards, { currentUser = 'JesseStutler', repos = [] } = {}) {
+  state.board = { currentUser, cards, columns: [], settings: { showOrchestrator: false, defaultRepo: 'volcano-sh/volcano', repos } };
+  state.filters = { repo: '', search: '', category: '', agent: '', author: '', updatesOnly: false, showDone: true };
   state.search = { key: '', matches: new Map() };
   state.ai = { status: 'idle', query: '', engine: '', error: '', matches: new Map() };
 }
@@ -294,3 +300,56 @@ test('issue review labels and multi-link search/attention', () => {
   assert.deepEqual(state.board.cards.filter(matchesFilters).map((c) => c.id), ['multi']);
   assert.deepEqual(sortColumnCards([quiet, multi], { sort: 'unread', pinned: new Set() }).map((c) => c.id), ['multi', 'quiet']);
 });
+
+test('multi-repo board scoping, summaries, and unread counts', () => {
+  const repos = [
+    { repo: 'volcano-sh/volcano', workspacePath: '/code/volcano' },
+    { repo: 'kubernetes/kubernetes', workspacePath: '/code/k8s' },
+  ];
+  const vCard = pr({ id: 'v1', ghRepo: 'volcano-sh/volcano', ghNumber: 6247, hasUnreadUpdates: true });
+  const kCard = pr({ id: 'k1', ghRepo: 'kubernetes/kubernetes', ghNumber: 1200, ghAuthor: 'alice', hasUnreadUpdates: true });
+  const manualK = card({ id: 'mk', repo: 'kubernetes/kubernetes', title: 'Investigate preemption' });
+  const cross = pr({
+    id: 'cross',
+    ghRepo: 'volcano-sh/volcano',
+    ghNumber: 6300,
+    ghLinks: [
+      { id: 'l1', repo: 'volcano-sh/volcano', number: 6300, kind: 'pr', author: 'bob', state: 'OPEN', lastSyncedAt: '2026-11-25T01:00:00Z' },
+      { id: 'l2', repo: 'JesseStutler/kubernetes', number: 1, kind: 'issue', author: 'JesseStutler', state: 'OPEN', lastSyncedAt: '2026-11-25T01:00:00Z' },
+    ],
+  });
+  const cwdCard = card({ id: 'cwd', session: { cwd: '/code/k8s/pkg/scheduler' } });
+  setBoard([vCard, kCard, manualK, cross, cwdCard], { repos });
+
+  assert.deepEqual(cardRepos(cross), ['volcano-sh/volcano', 'JesseStutler/kubernetes']);
+  assert.deepEqual(cardRepos(cwdCard), ['kubernetes/kubernetes']);
+  assert.equal(workspaceForRepo('kubernetes/kubernetes'), '/code/k8s');
+  assert.equal(cardBelongsToRepo(cross, 'JesseStutler/kubernetes'), true);
+
+  const summary = boardRepoSummary();
+  assert.equal(summary.totalCount, 5);
+  assert.equal(summary.totalUnread, 2);
+  assert.deepEqual(
+    summary.repos.map((r) => [r.repo, r.count, r.unread, r.configured]),
+    [
+      ['volcano-sh/volcano', 2, 1, true],
+      ['kubernetes/kubernetes', 3, 1, true],
+      ['JesseStutler/kubernetes', 1, 0, false],
+    ],
+  );
+
+  const shown = () => state.board.cards.filter(matchesFilters).map((c) => c.id);
+  assert.equal(shown().length, 5);
+  assert.equal(otherReposUnreadCount(), 0);
+
+  state.filters.repo = 'kubernetes/kubernetes';
+  assert.deepEqual(shown(), ['k1', 'mk', 'cwd']);
+  assert.equal(unreadCount(), 1);
+  assert.equal(otherReposUnreadCount(), 1, 'volcano unread is flagged as other-repo unread');
+
+  state.filters.repo = 'JesseStutler/kubernetes';
+  assert.deepEqual(shown(), ['cross']);
+  assert.equal(unreadCount(), 0);
+  assert.equal(otherReposUnreadCount(), 2);
+});
+

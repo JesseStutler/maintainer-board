@@ -295,6 +295,7 @@ func (s *Server) createSessionCard(ctx context.Context, sess ao.Session) (*db.Ca
 			title = "Orchestrator " + sess.ID
 		}
 	}
+	matchedRepo := s.repoForCWD(ctx, sess.CWD)
 	card := &db.Card{
 		Title:       title,
 		ColumnID:    intake.ID,
@@ -303,6 +304,7 @@ func (s *Server) createSessionCard(ctx context.Context, sess ao.Session) (*db.Ca
 		AOTitle:     aoTitle,
 		AutoMove:    true,
 		Origin:      db.OriginAO,
+		Repo:        matchedRepo,
 	}
 	events := []db.EventInput{{
 		Kind:    db.EventCreated,
@@ -311,6 +313,9 @@ func (s *Server) createSessionCard(ctx context.Context, sess ao.Session) (*db.Ca
 	// Link pull requests AO already attached to the session, plus any PR or
 	// issue references mentioned in its title such as "#6081 #6196".
 	defaultRepo := s.defaultRepo(ctx)
+	if matchedRepo != "" {
+		defaultRepo = matchedRepo
+	}
 	var refs []github.Ref
 	seenRefs := map[string]bool{}
 	addRef := func(r github.Ref) {
@@ -429,6 +434,15 @@ func (s *Server) startSession(ctx context.Context, cardID string, req agentReque
 		return nil, fmt.Errorf("%w: the card already has an agent session", errConflict)
 	}
 	project := strings.TrimSpace(req.ProjectID)
+	if project == "" {
+		repo := card.GHRepo
+		if repo == "" {
+			repo = card.Repo
+		}
+		if ws := s.repoWorkspacePath(ctx, repo); ws != "" {
+			project = ws
+		}
+	}
 	if project == "" {
 		project = s.defaultProject()
 	}

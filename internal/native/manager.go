@@ -194,6 +194,18 @@ func (m *Manager) resolveWorkspace(projectID string) (string, string) {
 				return p.ID, p.Path
 			}
 		}
+		// Allow dynamically configured repository workspace paths added via
+		// Settings without requiring a server restart.
+		if filepath.IsAbs(projectID) {
+			clean := filepath.Clean(projectID)
+			if info, err := os.Stat(clean); err == nil && info.IsDir() {
+				name := filepath.Base(clean)
+				if name == "" || name == "." || name == string(filepath.Separator) {
+					name = "workspace"
+				}
+				return name, clean
+			}
+		}
 	}
 	if len(m.projects) > 0 {
 		return m.projects[0].ID, m.projects[0].Path

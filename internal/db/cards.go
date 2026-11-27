@@ -111,6 +111,10 @@ type Card struct {
 	// Origin is "manual" for cards created by the user and "ao" for cards
 	// created automatically from an AO session.
 	Origin string `json:"origin"`
+	// Repo is the optional GitHub repository ("owner/name") that owns this
+	// card when filtering by repository board, especially for manual cards
+	// without GitHub links yet.
+	Repo string `json:"repo"`
 
 	GHRepo               string     `json:"ghRepo"`
 	GHKind               string     `json:"ghKind"`
@@ -176,7 +180,7 @@ type Card struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
-const cardColumns = `id, title, column_id, position, category, tags, ao_session_id, ao_title, summary, summary_source, notes, auto_move, origin,
+const cardColumns = `id, title, column_id, position, category, tags, ao_session_id, ao_title, summary, summary_source, notes, auto_move, origin, repo,
 	gh_repo, gh_kind, gh_number, gh_url, gh_title, gh_author, gh_state, gh_ci_status, gh_review_decision, gh_head_sha,
 	gh_commit_count, gh_comment_count, gh_review_comment_count, gh_labels, gh_updated_at, gh_last_synced_at, gh_error,
 	gh_my_review_state, gh_my_reviewed_at, gh_is_stale_review, gh_pending_feedback,
@@ -187,7 +191,7 @@ const cardColumns = `id, title, column_id, position, category, tags, ao_session_
 // fields returns pointers to every persisted field, in cardColumns order.
 func (c *Card) fields() []any {
 	return []any{
-		&c.ID, &c.Title, &c.ColumnID, &c.Position, &c.Category, &c.Tags, &c.AOSessionID, &c.AOTitle, &c.Summary, &c.SummarySource, &c.Notes, &c.AutoMove, &c.Origin,
+		&c.ID, &c.Title, &c.ColumnID, &c.Position, &c.Category, &c.Tags, &c.AOSessionID, &c.AOTitle, &c.Summary, &c.SummarySource, &c.Notes, &c.AutoMove, &c.Origin, &c.Repo,
 		&c.GHRepo, &c.GHKind, &c.GHNumber, &c.GHURL, &c.GHTitle, &c.GHAuthor, &c.GHState, &c.GHCIStatus, &c.GHReviewDecision, &c.GHHeadSHA,
 		&c.GHCommitCount, &c.GHCommentCount, &c.GHReviewCommentCount, &c.GHLabels, &c.GHUpdatedAt, &c.GHLastSyncedAt, &c.GHError,
 		&c.GHMyReviewState, &c.GHMyReviewedAt, &c.GHIsStaleReview, &c.GHPendingFeedback,

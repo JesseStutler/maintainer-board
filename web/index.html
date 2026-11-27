@@ -16,7 +16,15 @@
         <span class="brand-mark" aria-hidden="true"><span class="icon" data-icon="kanban" data-size="16"></span></span>
         <h1 class="brand">Maintainer Board</h1>
         <span class="topbar-sep" aria-hidden="true"></span>
-        <span id="repo-context" class="repo-context mono" title="Default repository for bare #123 references"></span>
+        <div id="repo-switcher" class="repo-switcher">
+          <button id="btn-repo-switcher" class="repo-trigger" type="button" aria-haspopup="menu" aria-expanded="false"
+            title="Switch repository board or add a new repository">
+            <span id="repo-context" class="repo-context mono"></span>
+            <span id="repo-other-dot" class="repo-dot" hidden title="Other repositories have unread updates"></span>
+            <span class="icon" data-icon="chevron-down" data-size="13"></span>
+          </button>
+          <div id="repo-menu" class="repo-menu" role="menu" hidden></div>
+        </div>
         <span id="ao-status" class="pill pill-muted" title="AO daemon status">
           <span class="dot"></span><span class="pill-label">AO Connecting</span>
         </span>

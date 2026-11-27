@@ -721,14 +721,28 @@ func (s *Server) handleLinkGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	var req struct {
-		Ref     string   `json:"ref"`
-		Refs    []string `json:"refs"`
-		Replace bool     `json:"replace"`
+		Ref         string   `json:"ref"`
+		Refs        []string `json:"refs"`
+		Replace     bool     `json:"replace"`
+		DefaultRepo string   `json:"defaultRepo"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	existingCard, err := s.store.GetCard(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	defaultRepo := s.defaultRepo(ctx)
+	if existingCard.Repo != "" {
+		defaultRepo = existingCard.Repo
+	}
+	if strings.TrimSpace(req.DefaultRepo) != "" {
+		if norm, err := github.NormalizeRepo(req.DefaultRepo); err == nil {
+			defaultRepo = norm
+		}
+	}
 	rawInputs := make([]string, 0, len(req.Refs)+1)
 	if strings.TrimSpace(req.Ref) != "" {
 		rawInputs = append(rawInputs, req.Ref)
@@ -752,10 +766,6 @@ func (s *Server) handleLinkGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(refs) == 0 {
 		s.writeGitHubError(w, fmt.Errorf("%w: empty input", github.ErrBadRef))
-		return
-	}
-	if _, err := s.store.GetCard(ctx, id); err != nil {
-		s.writeStoreError(w, err)
 		return
 	}
 	items := make([]*github.Item, 0, len(refs))

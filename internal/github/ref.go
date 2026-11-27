@@ -43,6 +43,25 @@ func ValidRepo(repo string) bool {
 	return repoRe.MatchString(repo) && !strings.Contains(repo, "..")
 }
 
+var repoURLRe = regexp.MustCompile(`^(?:https?://)?(?:www\.)?github\.com/([^/\s]+/[^/\s?#]+)(?:[/?#].*)?$`)
+
+// NormalizeRepo accepts "owner/name" or a GitHub repository/PR/issue URL and
+// returns the canonical "owner/name" form.
+func NormalizeRepo(input string) (string, error) {
+	in := strings.TrimSpace(input)
+	if in == "" {
+		return "", fmt.Errorf("%w: empty repository", ErrBadRef)
+	}
+	if m := repoURLRe.FindStringSubmatch(in); m != nil {
+		in = strings.TrimSuffix(m[1], ".git")
+	}
+	in = strings.Trim(in, "/")
+	if !ValidRepo(in) {
+		return "", fmt.Errorf("%w: invalid repository %q (expected owner/name or GitHub URL)", ErrBadRef, input)
+	}
+	return in, nil
+}
+
 // ParseRef parses "#6247", "6247", "owner/repo#123" or a GitHub pull request
 // or issue URL. Bare numbers resolve against defaultRepo.
 func ParseRef(input, defaultRepo string) (Ref, error) {

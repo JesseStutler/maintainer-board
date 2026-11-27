@@ -2645,3 +2645,82 @@ func TestIssueReplyTrackingAndMultiLinkCard(t *testing.T) {
 	}
 }
 
+func TestMultiRepoSupport(t *testing.T) {
+	hn := newHarness(t)
+	k8sDir := t.TempDir()
+
+	// Invalid repo or missing workspace path is rejected cleanly.
+	if code := hn.errorCode(400, "PATCH", "/api/settings", map[string]any{
+		"repos": []map[string]string{{"repo": "not-a-repo"}},
+	}); code != "INVALID_INPUT" {
+		t.Fatalf("invalid repo code = %s", code)
+	}
+	if code := hn.errorCode(400, "PATCH", "/api/settings", map[string]any{
+		"repos": []map[string]string{{"repo": "kubernetes/kubernetes", "workspacePath": k8sDir + "/missing"}},
+	}); code != "INVALID_INPUT" {
+		t.Fatalf("missing workspace path code = %s", code)
+	}
+
+	// Save additional repositories via URL or owner/name; defaultRepo is always retained.
+	out := hn.must(200, "PATCH", "/api/settings", map[string]any{
+		"repos": []map[string]string{
+			{"repo": "https://github.com/kubernetes/kubernetes", "workspacePath": k8sDir},
+			{"repo": "https://github.com/JesseStutler/kubernetes/issues/1"},
+		},
+	})
+	repos := out["repos"].([]any)
+	if len(repos) != 3 {
+		t.Fatalf("repos len = %d (%v), want 3 (default + 2 added)", len(repos), repos)
+	}
+
+	// Bound workspace path is merged into board.ao.projects dynamically.
+	board := hn.must(200, "GET", "/api/board", nil)
+	projects := board["ao"].(map[string]any)["projects"].([]any)
+	foundProj := false
+	for _, p := range projects {
+		pm := p.(map[string]any)
+		if pm["id"] == k8sDir && pm["path"] == k8sDir {
+			foundProj = true
+		}
+	}
+	if !foundProj {
+		t.Fatalf("expected dynamic project %q in board.ao.projects = %v", k8sDir, projects)
+	}
+
+	// Seed GitHub items for kubernetes/kubernetes #1 and #2.
+	hn.gh.items["kubernetes/kubernetes#1"] = &github.Item{
+		Repo: "kubernetes/kubernetes", Number: 1, Kind: github.KindIssue,
+		Title: "Scheduler preemption bug", URL: "https://github.com/kubernetes/kubernetes/issues/1",
+		Author: "alice", Snapshot: github.Snapshot{State: github.StateOpen},
+	}
+	hn.gh.items["kubernetes/kubernetes#2"] = &github.Item{
+		Repo: "kubernetes/kubernetes", Number: 2, Kind: github.KindPR,
+		Title: "Fix preemption bug", URL: "https://github.com/kubernetes/kubernetes/pull/2",
+		Author: "alice", Snapshot: github.Snapshot{State: github.StateOpen},
+	}
+
+	// Bare #1 resolves against the card's selected repo, and starting an agent
+	// without an explicit projectId picks that repo's bound workspace path.
+	created := hn.must(201, "POST", "/api/cards", map[string]any{
+		"repo":      "kubernetes/kubernetes",
+		"githubRef": "#1",
+		"agent":     map[string]any{"harness": "codex", "prompt": "investigate #1"},
+	})["card"].(map[string]any)
+	cardID := created["id"].(string)
+	c := hn.card(cardID)
+	if c.Repo != "kubernetes/kubernetes" || c.GHRepo != "kubernetes/kubernetes" || c.GHNumber != 1 {
+		t.Fatalf("created card = %+v", c)
+	}
+	if got := hn.ao.spawned[len(hn.ao.spawned)-1].ProjectID; got != k8sDir {
+		t.Fatalf("spawned ProjectID = %q, want %q", got, k8sDir)
+	}
+
+	// Linking a bare #2 on this card resolves against card.Repo (kubernetes/kubernetes).
+	hn.must(200, "POST", "/api/cards/"+cardID+"/link-github", map[string]any{"ref": "#2"})
+	c = hn.card(cardID)
+	if len(c.GHLinks) != 2 || c.GHLinks[1].Repo != "kubernetes/kubernetes" || c.GHLinks[1].Number != 2 {
+		t.Fatalf("GHLinks after bare #2 = %+v", c.GHLinks)
+	}
+}
+
+
