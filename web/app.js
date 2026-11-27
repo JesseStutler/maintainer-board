@@ -261,6 +261,16 @@ function closeRepoMenu() {
   if (btn) btn.setAttribute('aria-expanded', 'false');
 }
 
+function positionRepoMenu() {
+  const menu = $('repo-menu');
+  const btn = $('btn-repo-switcher');
+  if (!menu || !btn) return;
+  const r = btn.getBoundingClientRect();
+  const maxLeft = Math.max(8, window.innerWidth - 340);
+  menu.style.left = `${Math.max(8, Math.min(r.left, maxLeft))}px`;
+  menu.style.top = `${r.bottom + 6}px`;
+}
+
 function renderRepoMenu() {
   const menu = $('repo-menu');
   if (!menu || !state.board) return;
@@ -590,11 +600,15 @@ function init() {
     }
     repoMenuOpen = true;
     renderRepoMenu();
+    positionRepoMenu();
     $('repo-menu').hidden = false;
     $('btn-repo-switcher').setAttribute('aria-expanded', 'true');
   });
   document.addEventListener('click', (e) => {
     if (repoMenuOpen && !$('repo-switcher').contains(e.target)) closeRepoMenu();
+  });
+  window.addEventListener('resize', () => {
+    if (repoMenuOpen) positionRepoMenu();
   });
 
   $('btn-new').addEventListener('click', () => openNewTask({ onCreated: (card) => openDrawer(card.id) }));
